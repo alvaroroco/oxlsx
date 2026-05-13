@@ -61,6 +61,10 @@ impl SharedStrings {
     pub fn as_slice(&self) -> &[String] {
         self.0.as_slice()
     }
+
+    pub fn into_inner(self) -> Vec<String> {
+        self.0
+    }
 }
 
 fn attr_usize(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<usize>, OxlsxError> {

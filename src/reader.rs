@@ -1,4 +1,4 @@
-use crate::{Fill, Font, OxlsxError, StyleId, StyleSheet};
+use crate::{Fill, Font, OxlsxError, SharedStrings, StyleId, StyleSheet};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
@@ -79,11 +79,17 @@ impl Workbook {
             Arc::new(StyleSheet::parse(BufReader::new(styles_file))?)
         };
 
+        let shared_strings: Vec<String> = match archive.by_name("xl/sharedStrings.xml") {
+            Ok(f) => SharedStrings::parse(BufReader::new(f))?.into_inner(),
+            Err(ZipError::FileNotFound) => Vec::new(),
+            Err(e) => return Err(OxlsxError::Zip(e)),
+        };
+
         let worksheet = {
             let sheet_file = archive
                 .by_name("xl/worksheets/sheet1.xml")
                 .map_err(|_| OxlsxError::MissingPart("xl/worksheets/sheet1.xml".to_string()))?;
-            parse_sheet(BufReader::new(sheet_file), styles.clone())?
+            parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?
         };
 
         Ok(Self {
@@ -96,7 +102,11 @@ impl Workbook {
     }
 }
 
-fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Worksheet, OxlsxError> {
+fn parse_sheet<R: BufRead>(
+    reader: R,
+    styles: Arc<StyleSheet>,
+    shared_strings: &[String],
+) -> Result<Worksheet, OxlsxError> {
     let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
@@ -134,7 +144,13 @@ fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Workshe
                 in_value = false;
                 if let Some(builder) = current.as_mut() {
                     builder.value = match builder.cell_type.as_str() {
-                        "s" => Value::Empty,
+                        "s" => text
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| shared_strings.get(i))
+                            .map(|s| Value::String(s.to_string()))
+                            .unwrap_or(Value::Empty),
+                        "b" => Value::Bool(text == "1"),
                         _ => text
                             .parse::<f64>()
                             .map(Value::Number)
