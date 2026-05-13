@@ -1,5 +1,5 @@
-use oxlsx::{Color, StyleId, Value, Workbook};
 use chrono::NaiveDate;
+use oxlsx::{Color, StyleId, Value, Workbook};
 
 #[test]
 fn phase3_multi_sheet_workbook() {

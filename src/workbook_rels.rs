@@ -47,8 +47,8 @@ fn parse_workbook<R: BufRead>(reader: R) -> Result<(Vec<(String, String)>, usize
                     }
                 }
                 b"workbookView" => {
-                    if let Some(idx) = attr_value(&e, b"activeTab")?
-                        .and_then(|s| s.parse::<usize>().ok())
+                    if let Some(idx) =
+                        attr_value(&e, b"activeTab")?.and_then(|s| s.parse::<usize>().ok())
                     {
                         active_index = idx;
                     }
@@ -140,9 +140,11 @@ mod tests {
 
     #[test]
     fn parse_sheet_refs_resolves_order_names_paths_and_active_tab() {
-        let (sheets, active_index) =
-            parse_sheet_refs(Cursor::new(WORKBOOK_XML.as_bytes()), Cursor::new(RELS_XML.as_bytes()))
-                .unwrap();
+        let (sheets, active_index) = parse_sheet_refs(
+            Cursor::new(WORKBOOK_XML.as_bytes()),
+            Cursor::new(RELS_XML.as_bytes()),
+        )
+        .unwrap();
 
         assert_eq!(active_index, 1);
         assert_eq!(sheets.len(), 2);
@@ -154,7 +156,10 @@ mod tests {
 
     #[test]
     fn normalize_target_prepends_xl_for_relative_paths() {
-        assert_eq!(normalize_target("worksheets/sheet1.xml"), "xl/worksheets/sheet1.xml");
+        assert_eq!(
+            normalize_target("worksheets/sheet1.xml"),
+            "xl/worksheets/sheet1.xml"
+        );
     }
 
     #[test]

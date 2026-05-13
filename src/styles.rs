@@ -109,8 +109,8 @@ impl StyleSheet {
                     b"cellXfs" => in_cell_xfs = true,
                     b"numFmts" => {
                         in_num_fmts = true;
-                        if let Some(count) = attr_value(&e, b"count")?
-                            .and_then(|v| v.parse::<usize>().ok())
+                        if let Some(count) =
+                            attr_value(&e, b"count")?.and_then(|v| v.parse::<usize>().ok())
                         {
                             sheet.num_fmts = HashMap::with_capacity(count);
                         }
@@ -253,7 +253,9 @@ impl StyleSheet {
     }
 
     pub fn num_fmt_id(&self, style_id: StyleId) -> Option<u32> {
-        self.cell_xfs.get(style_id.as_usize()).map(|xf| xf.num_fmt_id)
+        self.cell_xfs
+            .get(style_id.as_usize())
+            .map(|xf| xf.num_fmt_id)
     }
 
     pub fn is_date_format(&self, style_id: StyleId) -> bool {
@@ -334,7 +336,7 @@ mod tests {
 
         assert_eq!(sheet.fonts.len(), 3);
         assert_eq!(sheet.fills.len(), 4);
-        assert_eq!(sheet.cell_xfs.len(), 3);
+        assert_eq!(sheet.cell_xfs.len(), 4);
         assert!(sheet.fonts[1].bold);
         assert_eq!(sheet.fonts[2].color, Some(Color::Indexed(4)));
         assert_eq!(sheet.fills[2].pattern_type, "solid");

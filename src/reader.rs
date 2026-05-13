@@ -113,9 +113,10 @@ impl Workbook {
             };
 
             let rels_xml = {
-                let mut rels_file = archive
-                    .by_name("xl/_rels/workbook.xml.rels")
-                    .map_err(|_| OxlsxError::MissingPart("xl/_rels/workbook.xml.rels".to_string()))?;
+                let mut rels_file =
+                    archive.by_name("xl/_rels/workbook.xml.rels").map_err(|_| {
+                        OxlsxError::MissingPart("xl/_rels/workbook.xml.rels".to_string())
+                    })?;
                 let mut bytes = Vec::new();
                 rels_file.read_to_end(&mut bytes)?;
                 bytes
