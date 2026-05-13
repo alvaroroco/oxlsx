@@ -296,15 +296,20 @@ const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
     fn parses_sheet_cells_style_ids_and_values() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
+        let ws = parse_sheet(
+            Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
+            styles,
+            &["Hola".to_string()],
+        )
+        .unwrap();
 
         let a1 = ws.cell("A1").unwrap();
         assert_eq!(a1.style_id(), StyleId(1));
-        assert_eq!(a1.value(), &Value::SharedStringIdx(0));
+        assert_eq!(a1.value(), &Value::String("Hola".to_string()));
 
         let b1 = ws.cell("B1").unwrap();
         assert_eq!(b1.style_id(), StyleId(2));
-        assert_eq!(b1.value(), &Value::SharedStringIdx(0));
+        assert_eq!(b1.value(), &Value::String("Hola".to_string()));
 
         let c1 = ws.cell("C1").unwrap();
         assert_eq!(c1.style_id(), StyleId(0));
@@ -317,7 +322,12 @@ const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
     fn style_accessors_use_stylesheet_via_style_id() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
+        let ws = parse_sheet(
+            Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
+            styles,
+            &["Hola".to_string()],
+        )
+        .unwrap();
 
         let a1 = ws.cell("A1").unwrap();
         assert!(a1.font().unwrap().bold);
@@ -328,9 +338,14 @@ const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
     fn cell_value_accessor_returns_parsed_value() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
+        let ws = parse_sheet(
+            Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
+            styles,
+            &["Hola".to_string()],
+        )
+        .unwrap();
 
-        assert_eq!(ws.cell("A1").unwrap().value(), &Value::SharedStringIdx(0));
+        assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("Hola".to_string()));
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
     }
 

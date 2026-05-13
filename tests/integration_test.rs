@@ -1,4 +1,4 @@
-use oxlsx::{Color, StyleId, Workbook};
+use oxlsx::{Color, StyleId, Value, Workbook};
 
 #[test]
 fn phase1_styles_and_cells_from_sample_workbook() {
@@ -7,6 +7,7 @@ fn phase1_styles_and_cells_from_sample_workbook() {
     let ws = wb.sheet(0).unwrap();
     let a1 = ws.cell("A1").unwrap();
     assert_eq!(a1.style_id(), StyleId(1));
+    assert_eq!(a1.value(), &Value::String("Hola".to_string()));
     assert!(a1.font().unwrap().bold);
     assert_eq!(a1.fill().unwrap().pattern_type, "solid");
     assert_eq!(a1.fill().unwrap().fg_color, Some(Color::Indexed(2)));
@@ -14,6 +15,7 @@ fn phase1_styles_and_cells_from_sample_workbook() {
     // B1: style_id=2, blue font (indexed 4), yellow fill (indexed 5)
     let b1 = ws.cell("B1").unwrap();
     assert_eq!(b1.style_id(), StyleId(2));
+    assert_eq!(b1.value(), &Value::String("Hola".to_string()));
     assert_eq!(b1.font().unwrap().color, Some(Color::Indexed(4)));
     assert_eq!(b1.fill().unwrap().fg_color, Some(Color::Indexed(5)));
 
