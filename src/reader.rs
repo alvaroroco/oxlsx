@@ -380,21 +380,21 @@ fn parse_sheet<R: BufRead>(
                 }
             }
             Event::End(e) if e.local_name().as_ref() == b"c" => {
-                if let Some(builder) = current.take() {
-                    if !builder.reference.is_empty() {
-                        let reference = builder.reference.clone();
-                        cells.insert(
-                            reference,
-                            Cell {
-                                reference: builder.reference,
-                                value: builder.value,
-                                style_id: builder.style_id,
-                                styles: styles.clone(),
-                                write_font: None,
-                                write_fill: None,
-                            },
-                        );
-                    }
+                if let Some(builder) = current.take()
+                    && !builder.reference.is_empty()
+                {
+                    let reference = builder.reference.clone();
+                    cells.insert(
+                        reference,
+                        Cell {
+                            reference: builder.reference,
+                            value: builder.value,
+                            style_id: builder.style_id,
+                            styles: styles.clone(),
+                            write_font: None,
+                            write_fill: None,
+                        },
+                    );
                 }
 
                 in_inline_str = false;
