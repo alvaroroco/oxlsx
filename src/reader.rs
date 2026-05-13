@@ -58,10 +58,15 @@ impl Cell {
 
 #[derive(Debug, Clone, Default)]
 pub struct Worksheet {
+    name: String,
     cells: HashMap<String, Cell>,
 }
 
 impl Worksheet {
+    pub fn title(&self) -> &str {
+        &self.name
+    }
+
     pub fn cell(&self, reference: &str) -> Option<&Cell> {
         self.cells.get(reference)
     }
@@ -70,6 +75,7 @@ impl Worksheet {
 #[derive(Debug, Clone, Default)]
 pub struct Workbook {
     sheets: Vec<Worksheet>,
+    active_index: usize,
 }
 
 impl Workbook {
@@ -104,7 +110,24 @@ impl Workbook {
 
         Ok(Self {
             sheets: vec![worksheet],
+            active_index: 0,
         })
+    }
+
+    pub fn worksheets(&self) -> &[Worksheet] {
+        &self.sheets
+    }
+
+    pub fn sheetnames(&self) -> Vec<&str> {
+        self.sheets.iter().map(|s| s.title()).collect()
+    }
+
+    pub fn sheet_by_name(&self, name: &str) -> Option<&Worksheet> {
+        self.sheets.iter().find(|s| s.title() == name)
+    }
+
+    pub fn active(&self) -> Option<&Worksheet> {
+        self.sheets.get(self.active_index)
     }
 
     pub fn sheet(&self, index: usize) -> Option<&Worksheet> {
@@ -230,7 +253,10 @@ fn parse_sheet<R: BufRead>(
         buf.clear();
     }
 
-    Ok(Worksheet { cells })
+    Ok(Worksheet {
+        name: String::new(),
+        cells,
+    })
 }
 
 #[derive(Debug)]
@@ -260,9 +286,10 @@ fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, Workbook, parse_sheet};
+    use super::{Value, Workbook, Worksheet, parse_sheet};
     use crate::{OxlsxError, StyleId, StyleSheet};
     use chrono::NaiveDate;
+    use std::collections::HashMap;
     use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -510,5 +537,29 @@ mod tests {
         let ws = parse_sheet(Cursor::new(NON_DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
 
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
+    }
+
+    #[test]
+    fn worksheet_title_and_workbook_multi_sheet_accessors() {
+        let wb = Workbook {
+            sheets: vec![
+                Worksheet {
+                    name: "Empleados".to_string(),
+                    cells: HashMap::new(),
+                },
+                Worksheet {
+                    name: "Productos".to_string(),
+                    cells: HashMap::new(),
+                },
+            ],
+            active_index: 1,
+        };
+
+        assert_eq!(wb.sheet(0).unwrap().title(), "Empleados");
+        assert_eq!(wb.sheet(1).unwrap().title(), "Productos");
+        assert_eq!(wb.sheetnames(), vec!["Empleados", "Productos"]);
+        assert!(wb.sheet_by_name("Empleados").is_some());
+        assert!(wb.sheet_by_name("NoExiste").is_none());
+        assert_eq!(wb.active().unwrap().title(), "Productos");
     }
 }
