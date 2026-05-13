@@ -11,8 +11,9 @@ use zip::result::ZipError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Empty,
-    SharedStringIdx(u32),
+    String(String),
     Number(f64),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -133,10 +134,7 @@ fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Workshe
                 in_value = false;
                 if let Some(builder) = current.as_mut() {
                     builder.value = match builder.cell_type.as_str() {
-                        "s" => text
-                            .parse::<u32>()
-                            .map(Value::SharedStringIdx)
-                            .unwrap_or(Value::Empty),
+                        "s" => Value::Empty,
                         _ => text
                             .parse::<f64>()
                             .map(Value::Number)
@@ -270,6 +268,15 @@ mod tests {
 
         assert_eq!(ws.cell("A1").unwrap().value(), &Value::SharedStringIdx(0));
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
+    }
+
+    #[test]
+    fn value_supports_string_and_bool_variants() {
+        let text = Value::String("Hola".to_string());
+        let boolean = Value::Bool(true);
+
+        assert_eq!(text, Value::String("Hola".to_string()));
+        assert_eq!(boolean, Value::Bool(true));
     }
 
     #[test]
