@@ -2,6 +2,7 @@ pub mod error;
 pub mod reader;
 pub mod shared_strings;
 pub mod styles;
+pub mod workbook_rels;
 
 pub use error::OxlsxError;
 pub use reader::Value;
