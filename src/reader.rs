@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn workbook_open_invalid_zip_returns_invalid_format() {
-        let mut path = PathBuf::from(std::env::temp_dir());
+        let mut path = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

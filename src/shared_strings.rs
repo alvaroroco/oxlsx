@@ -126,8 +126,7 @@ mod tests {
         let result = SharedStrings::parse(Cursor::new(xml.as_slice()));
         assert!(
             matches!(result, Err(OxlsxError::Xml(_))),
-            "expected OxlsxError::Xml for malformed XML, got: {:?}",
-            result
+            "expected OxlsxError::Xml for malformed XML, got: {result:?}"
         );
     }
 }
