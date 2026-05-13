@@ -71,10 +71,7 @@ fn attr_usize(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<usize>, OxlsxErro
     for attr in e.attributes().with_checks(false) {
         let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
         if attr.key.as_ref() == key {
-            return Ok(attr
-                .unescape_value()?
-                .parse::<usize>()
-                .ok());
+            return Ok(attr.unescape_value()?.parse::<usize>().ok());
         }
     }
 
@@ -119,5 +116,18 @@ mod tests {
         let xml = r#"<sst uniqueCount="1" xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Hola</t></si></sst>"#;
         let shared = SharedStrings::parse(Cursor::new(xml.as_bytes())).unwrap();
         assert_eq!(shared.get(99), None);
+    }
+
+    #[test]
+    fn malformed_xml_returns_xml_error() {
+        use crate::OxlsxError;
+        // Invalid XML entity reference — quick-xml returns an error on unescape
+        let xml = b"<sst><si><t>&invalid_entity;</t></si></sst>";
+        let result = SharedStrings::parse(Cursor::new(xml.as_slice()));
+        assert!(
+            matches!(result, Err(OxlsxError::Xml(_))),
+            "expected OxlsxError::Xml for malformed XML, got: {:?}",
+            result
+        );
     }
 }

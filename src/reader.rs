@@ -250,7 +250,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <sheetData>
     <row r="1">
@@ -345,7 +345,10 @@ const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
         )
         .unwrap();
 
-        assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("Hola".to_string()));
+        assert_eq!(
+            ws.cell("A1").unwrap().value(),
+            &Value::String("Hola".to_string())
+        );
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
     }
 
@@ -369,7 +372,10 @@ const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalon
         )
         .unwrap();
 
-        assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("hello".into()));
+        assert_eq!(
+            ws.cell("A1").unwrap().value(),
+            &Value::String("hello".into())
+        );
         assert_eq!(ws.cell("B1").unwrap().value(), &Value::Bool(true));
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Bool(false));
     }
