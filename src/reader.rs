@@ -117,6 +117,11 @@ impl Worksheet {
         self.cells.get(reference)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn cells(&self) -> &HashMap<String, Cell> {
+        &self.cells
+    }
+
     pub fn set_cell(&mut self, reference: &str, value: impl Into<Value>) {
         let cell = self
             .cells

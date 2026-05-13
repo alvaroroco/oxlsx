@@ -45,6 +45,26 @@ impl Default for Fill {
     }
 }
 
+impl Fill {
+    #[allow(dead_code)]
+    pub(crate) fn none() -> Self {
+        Self {
+            pattern_type: "none".to_string(),
+            fg_color: None,
+            bg_color: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn gray125() -> Self {
+        Self {
+            pattern_type: "gray125".to_string(),
+            fg_color: None,
+            bg_color: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Font {
     pub name: String,
