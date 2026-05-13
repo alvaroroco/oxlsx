@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-coding": {
+      "source": "huiali/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-coding/SKILL.md",
+      "computedHash": "6999f1f42396a3d94ea7f108523ade1a46191916ea716cfe72d2ec7bd8d34b4b"
+    },
+    "rust-performance": {
+      "source": "huiali/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-performance/SKILL.md",
+      "computedHash": "b55f6c861e13aba111889bd8ad6fa8ba987a94573ca7e250c687305db4b43c54"
+    },
+    "rust-type-driven": {
+      "source": "huiali/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-type-driven/SKILL.md",
+      "computedHash": "bd0e9719e8289c558bfbafe047baed4a583ccc22c62828e7532216b288600ef1"
+    }
+  }
+}

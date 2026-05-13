@@ -1,7 +1,24 @@
 use crate::OxlsxError;
+use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
-use quick_xml::Reader;
+
+/// Newtype for a cell's `s` attribute — the index into `cellXfs`.
+/// Prevents confusing a `StyleId` with a raw `font_id` or `fill_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StyleId(pub usize);
+
+impl StyleId {
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl From<u32> for StyleId {
+    fn from(v: u32) -> Self {
+        StyleId(v as usize)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Color {
@@ -167,12 +184,12 @@ impl StyleSheet {
                 Event::End(e) => match e.local_name().as_ref() {
                     b"font" if in_fonts => {
                         in_font = false;
-                        sheet.fonts.push(cur_font.clone());
+                        sheet.fonts.push(std::mem::take(&mut cur_font));
                     }
                     b"fill" if in_fills => {
                         in_fill = false;
                         in_pattern_fill = false;
-                        sheet.fills.push(cur_fill.clone());
+                        sheet.fills.push(std::mem::take(&mut cur_fill));
                     }
                     b"patternFill" => in_pattern_fill = false,
                     b"fonts" => in_fonts = false,
@@ -190,13 +207,13 @@ impl StyleSheet {
         Ok(sheet)
     }
 
-    pub fn font(&self, style_id: u32) -> Option<&Font> {
-        let xf = self.cell_xfs.get(style_id as usize)?;
+    pub fn font(&self, style_id: StyleId) -> Option<&Font> {
+        let xf = self.cell_xfs.get(style_id.as_usize())?;
         self.fonts.get(xf.font_id as usize)
     }
 
-    pub fn fill(&self, style_id: u32) -> Option<&Fill> {
-        let xf = self.cell_xfs.get(style_id as usize)?;
+    pub fn fill(&self, style_id: StyleId) -> Option<&Fill> {
+        let xf = self.cell_xfs.get(style_id.as_usize())?;
         self.fills.get(xf.fill_id as usize)
     }
 }
@@ -233,7 +250,7 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, StyleSheet};
+    use super::{Color, StyleId, StyleSheet};
     use std::io::Cursor;
 
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -274,7 +291,10 @@ mod tests {
     fn resolves_fonts_and_fills_by_style_id() {
         let sheet = StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap();
 
-        assert!(sheet.font(1).unwrap().bold);
-        assert_eq!(sheet.font(2).unwrap().color, Some(Color::Indexed(4)));
+        assert!(sheet.font(StyleId(1)).unwrap().bold);
+        assert_eq!(
+            sheet.font(StyleId(2)).unwrap().color,
+            Some(Color::Indexed(4))
+        );
     }
 }

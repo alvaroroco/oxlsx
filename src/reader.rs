@@ -1,6 +1,6 @@
-use crate::{Fill, Font, OxlsxError, StyleSheet};
-use quick_xml::events::{BytesStart, Event};
+use crate::{Fill, Font, OxlsxError, StyleId, StyleSheet};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -19,7 +19,7 @@ pub enum Value {
 pub struct Cell {
     reference: String,
     value: Value,
-    style_id: u32,
+    style_id: StyleId,
     styles: Arc<StyleSheet>,
 }
 
@@ -32,7 +32,7 @@ impl Cell {
         &self.value
     }
 
-    pub fn style_id(&self) -> u32 {
+    pub fn style_id(&self) -> StyleId {
         self.style_id
     }
 
@@ -110,8 +110,9 @@ fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Workshe
             Event::Start(e) if e.local_name().as_ref() == b"c" => {
                 let reference = attr_value(&e, b"r")?.unwrap_or_default();
                 let style_id = attr_value(&e, b"s")?
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .map(StyleId)
+                    .unwrap_or_default();
                 let cell_type = attr_value(&e, b"t")?.unwrap_or_else(|| "n".to_string());
 
                 current = Some(CellBuilder {
@@ -126,7 +127,7 @@ fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Workshe
                 text.clear();
             }
             Event::Text(t) if in_value => {
-                text.push_str(&t.unescape()?.into_owned());
+                text.push_str(&t.unescape()?);
             }
             Event::End(e) if e.local_name().as_ref() == b"v" => {
                 in_value = false;
@@ -172,7 +173,7 @@ fn parse_sheet<R: BufRead>(reader: R, styles: Arc<StyleSheet>) -> Result<Workshe
 #[derive(Debug)]
 struct CellBuilder {
     reference: String,
-    style_id: u32,
+    style_id: StyleId,
     cell_type: String,
     value: Value,
 }
@@ -190,13 +191,13 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sheet, Workbook, Value};
-    use crate::{OxlsxError, StyleSheet};
+    use super::{Value, Workbook, parse_sheet};
+    use crate::{OxlsxError, StyleId, StyleSheet};
     use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -231,19 +232,20 @@ mod tests {
 
     #[test]
     fn parses_sheet_cells_style_ids_and_values() {
-        let styles = Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
+        let styles =
+            Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
         let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
 
         let a1 = ws.cell("A1").unwrap();
-        assert_eq!(a1.style_id(), 1);
+        assert_eq!(a1.style_id(), StyleId(1));
         assert_eq!(a1.value(), &Value::SharedStringIdx(0));
 
         let b1 = ws.cell("B1").unwrap();
-        assert_eq!(b1.style_id(), 2);
+        assert_eq!(b1.style_id(), StyleId(2));
         assert_eq!(b1.value(), &Value::SharedStringIdx(0));
 
         let c1 = ws.cell("C1").unwrap();
-        assert_eq!(c1.style_id(), 0);
+        assert_eq!(c1.style_id(), StyleId(0));
         assert_eq!(c1.value(), &Value::Number(42.0));
 
         assert!(ws.cell("D1").is_none());
@@ -251,7 +253,8 @@ mod tests {
 
     #[test]
     fn style_accessors_use_stylesheet_via_style_id() {
-        let styles = Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
+        let styles =
+            Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
         let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
 
         let a1 = ws.cell("A1").unwrap();
@@ -261,7 +264,8 @@ mod tests {
 
     #[test]
     fn cell_value_accessor_returns_parsed_value() {
-        let styles = Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
+        let styles =
+            Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
         let ws = parse_sheet(Cursor::new(SAMPLE_SHEET_XML.as_bytes()), styles).unwrap();
 
         assert_eq!(ws.cell("A1").unwrap().value(), &Value::SharedStringIdx(0));
