@@ -100,6 +100,13 @@ pub struct Worksheet {
 }
 
 impl Worksheet {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            cells: HashMap::new(),
+        }
+    }
+
     pub fn title(&self) -> &str {
         &self.name
     }
@@ -109,13 +116,20 @@ impl Worksheet {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Workbook {
     sheets: Vec<Worksheet>,
     active_index: usize,
 }
 
 impl Workbook {
+    pub fn new() -> Self {
+        Self {
+            sheets: vec![Worksheet::new("Sheet")],
+            active_index: 0,
+        }
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, OxlsxError> {
         let file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|err| match err {
@@ -196,8 +210,25 @@ impl Workbook {
         self.sheets.get(self.active_index)
     }
 
+    pub fn active_mut(&mut self) -> Option<&mut Worksheet> {
+        self.sheets.get_mut(self.active_index)
+    }
+
     pub fn sheet(&self, index: usize) -> Option<&Worksheet> {
         self.sheets.get(index)
+    }
+
+    pub fn create_sheet(&mut self, name: &str) -> &mut Worksheet {
+        self.sheets.push(Worksheet::new(name));
+        self.sheets
+            .last_mut()
+            .expect("create_sheet always pushes one worksheet")
+    }
+}
+
+impl Default for Workbook {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -643,6 +674,29 @@ mod tests {
         assert!(wb.sheet_by_name("Empleados").is_some());
         assert!(wb.sheet_by_name("NoExiste").is_none());
         assert_eq!(wb.active().unwrap().title(), "Productos");
+    }
+
+    #[test]
+    fn workbook_new_creates_default_sheet() {
+        let wb = Workbook::new();
+
+        assert_eq!(wb.sheet(0).unwrap().title(), "Sheet");
+    }
+
+    #[test]
+    fn workbook_create_sheet_appends_new_sheet() {
+        let mut wb = Workbook::new();
+
+        wb.create_sheet("Data");
+
+        assert_eq!(wb.sheetnames(), vec!["Sheet", "Data"]);
+    }
+
+    #[test]
+    fn workbook_active_mut_returns_some_for_default_workbook() {
+        let mut wb = Workbook::new();
+
+        assert!(wb.active_mut().is_some());
     }
 
     #[test]
