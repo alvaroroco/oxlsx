@@ -1,0 +1,9 @@
+[package]
+name = "oxlsx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quick-xml = "0.36"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+thiserror = "1.0"
