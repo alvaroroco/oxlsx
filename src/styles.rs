@@ -2,6 +2,7 @@ use crate::OxlsxError;
 use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
+use std::collections::HashMap;
 
 /// Newtype for a cell's `s` attribute — the index into `cellXfs`.
 /// Prevents confusing a `StyleId` with a raw `font_id` or `fill_id`.
@@ -69,6 +70,7 @@ impl Default for Font {
 pub struct CellXf {
     pub font_id: u32,
     pub fill_id: u32,
+    pub num_fmt_id: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +78,7 @@ pub struct StyleSheet {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
     pub cell_xfs: Vec<CellXf>,
+    num_fmts: HashMap<u32, String>,
 }
 
 impl StyleSheet {
@@ -91,6 +94,7 @@ impl StyleSheet {
         let mut in_font = false;
         let mut in_fill = false;
         let mut in_pattern_fill = false;
+        let mut in_num_fmts = false;
 
         let mut cur_font = Font::default();
         let mut cur_fill = Fill::default();
@@ -103,6 +107,14 @@ impl StyleSheet {
                     b"fonts" => in_fonts = true,
                     b"fills" => in_fills = true,
                     b"cellXfs" => in_cell_xfs = true,
+                    b"numFmts" => {
+                        in_num_fmts = true;
+                        if let Some(count) = attr_value(&e, b"count")?
+                            .and_then(|v| v.parse::<usize>().ok())
+                        {
+                            sheet.num_fmts = HashMap::with_capacity(count);
+                        }
+                    }
                     b"font" if in_fonts => {
                         in_font = true;
                         cur_font = Font::default();
@@ -143,7 +155,18 @@ impl StyleSheet {
                             fill_id: attr_value(&e, b"fillId")?
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0),
+                            num_fmt_id: attr_value(&e, b"numFmtId")?
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(0),
                         });
+                    }
+                    b"numFmt" if in_num_fmts => {
+                        if let (Some(num_fmt_id), Some(format_code)) = (
+                            attr_value(&e, b"numFmtId")?.and_then(|v| v.parse::<u32>().ok()),
+                            attr_value(&e, b"formatCode")?,
+                        ) {
+                            sheet.num_fmts.insert(num_fmt_id, format_code);
+                        }
                     }
                     _ => {}
                 },
@@ -177,7 +200,18 @@ impl StyleSheet {
                             fill_id: attr_value(&e, b"fillId")?
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0),
+                            num_fmt_id: attr_value(&e, b"numFmtId")?
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(0),
                         });
+                    }
+                    b"numFmt" if in_num_fmts => {
+                        if let (Some(num_fmt_id), Some(format_code)) = (
+                            attr_value(&e, b"numFmtId")?.and_then(|v| v.parse::<u32>().ok()),
+                            attr_value(&e, b"formatCode")?,
+                        ) {
+                            sheet.num_fmts.insert(num_fmt_id, format_code);
+                        }
                     }
                     _ => {}
                 },
@@ -195,6 +229,7 @@ impl StyleSheet {
                     b"fonts" => in_fonts = false,
                     b"fills" => in_fills = false,
                     b"cellXfs" => in_cell_xfs = false,
+                    b"numFmts" => in_num_fmts = false,
                     _ => {}
                 },
                 Event::Eof => break,
@@ -215,6 +250,22 @@ impl StyleSheet {
     pub fn fill(&self, style_id: StyleId) -> Option<&Fill> {
         let xf = self.cell_xfs.get(style_id.as_usize())?;
         self.fills.get(xf.fill_id as usize)
+    }
+
+    pub fn num_fmt_id(&self, style_id: StyleId) -> Option<u32> {
+        self.cell_xfs.get(style_id.as_usize()).map(|xf| xf.num_fmt_id)
+    }
+
+    pub fn is_date_format(&self, style_id: StyleId) -> bool {
+        match self.num_fmt_id(style_id) {
+            Some(id) if (14..=17).contains(&id) || id == 22 => true,
+            Some(id) if id >= 164 => self
+                .num_fmts
+                .get(&id)
+                .map(|fmt| fmt.contains('y') || fmt.contains('d'))
+                .unwrap_or(false),
+            _ => false,
+        }
     }
 }
 
@@ -266,10 +317,14 @@ mod tests {
     <fill><patternFill patternType="solid"><fgColor indexed="2"/><bgColor indexed="2"/></patternFill></fill>
     <fill><patternFill patternType="solid"><fgColor indexed="5"/><bgColor indexed="5"/></patternFill></fill>
   </fills>
-  <cellXfs count="3">
-    <xf fontId="0" fillId="0"/>
-    <xf fontId="1" fillId="2"/>
-    <xf fontId="2" fillId="3"/>
+  <numFmts count="1">
+    <numFmt numFmtId="164" formatCode="dd/mm/yyyy"/>
+  </numFmts>
+  <cellXfs count="4">
+    <xf fontId="0" fillId="0" numFmtId="0"/>
+    <xf fontId="1" fillId="2" numFmtId="14"/>
+    <xf fontId="2" fillId="3" numFmtId="164"/>
+    <xf fontId="0" fillId="0" numFmtId="2"/>
   </cellXfs>
 </styleSheet>"#;
 
@@ -296,5 +351,16 @@ mod tests {
             sheet.font(StyleId(2)).unwrap().color,
             Some(Color::Indexed(4))
         );
+    }
+
+    #[test]
+    fn resolves_num_fmt_id_and_date_formats() {
+        let sheet = StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap();
+
+        assert_eq!(sheet.num_fmt_id(StyleId(2)), Some(164));
+        assert!(sheet.is_date_format(StyleId(1)));
+        assert!(sheet.is_date_format(StyleId(2)));
+        assert!(!sheet.is_date_format(StyleId(0)));
+        assert!(!sheet.is_date_format(StyleId(3)));
     }
 }
