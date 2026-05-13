@@ -360,12 +360,12 @@ fn parse_sheet<R: BufRead>(
                             .unwrap_or(Value::Empty),
                     };
 
-                    if let Value::Number(n) = value {
-                        if styles.is_date_format(builder.style_id) {
-                            value = excel_serial_to_date(n)
-                                .map(Value::Date)
-                                .unwrap_or(Value::Number(n));
-                        }
+                    if let Value::Number(n) = value
+                        && styles.is_date_format(builder.style_id)
+                    {
+                        value = excel_serial_to_date(n)
+                            .map(Value::Date)
+                            .unwrap_or(Value::Number(n));
                     }
 
                     builder.value = value;
@@ -380,21 +380,21 @@ fn parse_sheet<R: BufRead>(
                 }
             }
             Event::End(e) if e.local_name().as_ref() == b"c" => {
-                if let Some(builder) = current.take() {
-                    if !builder.reference.is_empty() {
-                        let reference = builder.reference.clone();
-                        cells.insert(
-                            reference,
-                            Cell {
-                                reference: builder.reference,
-                                value: builder.value,
-                                style_id: builder.style_id,
-                                styles: styles.clone(),
-                                write_font: None,
-                                write_fill: None,
-                            },
-                        );
-                    }
+                if let Some(builder) = current.take()
+                    && !builder.reference.is_empty()
+                {
+                    let reference = builder.reference.clone();
+                    cells.insert(
+                        reference,
+                        Cell {
+                            reference: builder.reference,
+                            value: builder.value,
+                            style_id: builder.style_id,
+                            styles: styles.clone(),
+                            write_font: None,
+                            write_fill: None,
+                        },
+                    );
                 }
 
                 in_inline_str = false;
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn workbook_open_invalid_zip_returns_invalid_format() {
-        let mut path = PathBuf::from(std::env::temp_dir());
+        let mut path = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

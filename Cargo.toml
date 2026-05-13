@@ -8,3 +8,14 @@ quick-xml = "0.36"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 thiserror = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "read_benchmarks"
+harness = false
+
+[[bench]]
+name = "write_benchmarks"
+harness = false

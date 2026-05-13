@@ -307,15 +307,15 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     if let Some(rgb) = attr_value(e, b"rgb")? {
         return Ok(Some(Color::Argb(rgb)));
     }
-    if let Some(indexed) = attr_value(e, b"indexed")? {
-        if let Ok(value) = indexed.parse::<u32>() {
-            return Ok(Some(Color::Indexed(value)));
-        }
+    if let Some(indexed) = attr_value(e, b"indexed")?
+        && let Ok(value) = indexed.parse::<u32>()
+    {
+        return Ok(Some(Color::Indexed(value)));
     }
-    if let Some(theme) = attr_value(e, b"theme")? {
-        if let Ok(value) = theme.parse::<u32>() {
-            return Ok(Some(Color::Theme(value)));
-        }
+    if let Some(theme) = attr_value(e, b"theme")?
+        && let Ok(value) = theme.parse::<u32>()
+    {
+        return Ok(Some(Color::Theme(value)));
     }
 
     Ok(None)
