@@ -138,17 +138,33 @@ impl Worksheet {
     }
 
     pub fn set_cell_font(&mut self, reference: &str, font: Font) {
-        self.set_cell(reference, Value::Empty);
-        if let Some(cell) = self.cells.get_mut(reference) {
-            cell.write_font = Some(font);
-        }
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.write_font = Some(font);
     }
 
     pub fn set_cell_fill(&mut self, reference: &str, fill: Fill) {
-        self.set_cell(reference, Value::Empty);
-        if let Some(cell) = self.cells.get_mut(reference) {
-            cell.write_fill = Some(fill);
-        }
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.write_fill = Some(fill);
     }
 }
 
@@ -259,6 +275,10 @@ impl Workbook {
         self.sheets
             .last_mut()
             .expect("create_sheet always pushes one worksheet")
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), OxlsxError> {
+        crate::writer::write_xlsx(self, path.as_ref())
     }
 }
 
@@ -430,6 +450,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{stamp}_{name}"))
+    }
 
     const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -743,6 +771,18 @@ mod tests {
         let mut wb = Workbook::new();
 
         assert!(wb.active_mut().is_some());
+    }
+
+    #[test]
+    fn workbook_save_writes_xlsx_file() {
+        let mut wb = Workbook::new();
+        wb.active_mut().unwrap().set_cell("A1", "saved");
+        let path = tmp_path("workbook_save_writes_xlsx_file.xlsx");
+
+        wb.save(&path).unwrap();
+
+        assert!(path.exists());
+        fs::remove_file(path).ok();
     }
 
     #[test]
