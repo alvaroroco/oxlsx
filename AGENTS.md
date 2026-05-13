@@ -1,0 +1,86 @@
+# oxlsx — Agent Instructions
+
+## Project Vision
+
+oxlsx is **openpyxl in Rust**, designed to eventually expose Python bindings via PyO3.
+The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as closely as the language allows.
+
+## openpyxl API Parity (MANDATORY)
+
+Before designing, speccing, or implementing ANY public API, verify it against openpyxl:
+- Docs: https://openpyxl.readthedocs.io/en/stable/api/openpyxl.html
+- Worksheet API: https://openpyxl.readthedocs.io/en/stable/api/openpyxl.worksheet.worksheet.html
+- Cell API: https://openpyxl.readthedocs.io/en/stable/api/openpyxl.cell.cell.html
+
+### Confirmed API mappings (do NOT deviate without explicit user approval)
+
+| openpyxl (Python) | oxlsx (Rust) | Notes |
+|-------------------|--------------|-------|
+| `load_workbook("f.xlsx")` | `Workbook::open("f.xlsx")` | Returns `Result<Workbook, OxlsxError>` |
+| `wb.worksheets` | `wb.worksheets()` | Returns `&[Worksheet]` |
+| `wb.sheetnames` | `wb.sheetnames()` | Returns `Vec<&str>` — NOT `sheet_names()` |
+| `wb.active` | `wb.active()` | Returns `Option<&Worksheet>` |
+| `wb["Sheet1"]` | `wb.sheet_by_name("Sheet1")` | Phase 4: add `Index` trait |
+| `ws.title` | `ws.title()` | Returns `&str` — NOT `ws.name()` |
+| `ws["A1"]` / `ws.cell(row, col)` | `ws.cell("A1")` | Excel-style coords |
+| `cell.value` → `str/int/float/date` | `cell.value()` → `&Value` | `Value::String/Number/Bool/Date` |
+| `cell.value` → `datetime.date` | `cell.value()` → `&Value::Date(NaiveDate)` | Resolved at parse time, NOT via accessor |
+| `cell.fill.fgColor` | `cell.fill()?.fg_color` | Returns `Option<&Fill>` |
+| `cell.font.bold` | `cell.font()?.bold` | Returns `Option<&Font>` |
+
+### API review checklist (run before every sdd-propose or sdd-spec)
+
+- [ ] Method names match openpyxl (check docs URL above)
+- [ ] `Value` variants cover all openpyxl cell value types
+- [ ] Date cells resolve to `Value::Date` at parse time — no separate accessor
+- [ ] No `get_` prefix on any public method (rust-coding convention)
+- [ ] No lifetime parameters on public structs (PyO3 compatibility)
+- [ ] `Arc<StyleSheet>` pattern preserved for shared style ownership
+
+## Architecture Constraints
+
+- **SAX only** — `quick-xml` event loop, no DOM, no full-file loading
+- **ZIP direct** — read from the ZIP container, no temp disk extraction
+- **`Arc<StyleSheet>`** — shared across `Workbook → Worksheet → Cell`, no lifetime params
+- **PyO3-ready** — public structs must be `'static` compatible
+- **Newtype pattern** — `StyleId(usize)` for domain index types (rust-type-driven)
+
+## Tech Stack
+
+- Rust edition 2024
+- `quick-xml` — SAX parsing
+- `zip` (deflate only, no bzip2/zstd for PyO3 wheel size)
+- `thiserror` — error types
+- `chrono` — date resolution
+
+## Skills
+
+Project-specific skills are in `.agents/skills/`:
+- `rust-coding` — naming, clippy, fmt conventions
+- `rust-performance` — avoid clones, pre-allocate, mem::take
+- `rust-type-driven` — newtype pattern, invalid states unrepresentable
+
+## TDD
+
+**Strict TDD is always active.** Test runner: `cargo test`
+- Write the failing test FIRST
+- Every spec scenario becomes a `cargo test`
+- `cargo clippy -- -D warnings` and `cargo fmt --check` must pass before any commit
+
+## Sample Files
+
+| File | Purpose |
+|------|---------|
+| `samples/test.xlsx` | Single-sheet regression fixture (Phase 1+2) |
+| `samples/multi_sheet.xlsx` | Multi-sheet fixture: "Empleados" + "Productos" (Phase 3+) |
+
+### Key assertions from samples
+
+**samples/test.xlsx — sheet "Hoja1":**
+- `A1`: `Value::String("Hola")`, bold font, solid fill `Color::Indexed(2)`
+- `B1`: `Value::String("Hola")`, `Color::Indexed(4)` font, `Color::Indexed(5)` fill
+- `C1`: `Value::Number(42.0)`, style_id=0
+
+**samples/multi_sheet.xlsx:**
+- Sheet[0] "Empleados": A1=`Value::String("Juan")`, B1=`Value::Date(2025-01-21)` (numFmtId=164)
+- Sheet[1] "Productos": A1=`Value::String("Laptop")`, B1=`Value::String("999.99")`
