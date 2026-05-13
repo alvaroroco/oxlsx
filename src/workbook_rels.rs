@@ -75,12 +75,11 @@ fn parse_rels<R: BufRead>(reader: R) -> Result<HashMap<String, String>, OxlsxErr
         match xml.read_event_into(&mut buf)? {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
                 let rel_type = attr_value(&e, b"Type")?;
-                if rel_type.as_deref().is_some_and(|t| t.contains("worksheet")) {
-                    if let (Some(id), Some(target)) =
+                if rel_type.as_deref().is_some_and(|t| t.contains("worksheet"))
+                    && let (Some(id), Some(target)) =
                         (attr_value(&e, b"Id")?, attr_value(&e, b"Target")?)
-                    {
-                        rels.insert(id, normalize_target(&target));
-                    }
+                {
+                    rels.insert(id, normalize_target(&target));
                 }
             }
             Event::Eof => break,

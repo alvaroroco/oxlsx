@@ -360,12 +360,12 @@ fn parse_sheet<R: BufRead>(
                             .unwrap_or(Value::Empty),
                     };
 
-                    if let Value::Number(n) = value {
-                        if styles.is_date_format(builder.style_id) {
-                            value = excel_serial_to_date(n)
-                                .map(Value::Date)
-                                .unwrap_or(Value::Number(n));
-                        }
+                    if let Value::Number(n) = value
+                        && styles.is_date_format(builder.style_id)
+                    {
+                        value = excel_serial_to_date(n)
+                            .map(Value::Date)
+                            .unwrap_or(Value::Number(n));
                     }
 
                     builder.value = value;
