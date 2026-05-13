@@ -1,5 +1,10 @@
 use chrono::NaiveDate;
-use oxlsx::{Color, StyleId, Value, Workbook};
+use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
+use std::env;
+
+fn temp_path(name: &str) -> std::path::PathBuf {
+    env::temp_dir().join(name)
+}
 
 #[test]
 fn phase3_multi_sheet_workbook() {
@@ -57,4 +62,115 @@ fn phase3_regression_test_xlsx() {
 
     assert!(ws.cell("D1").is_none());
     assert!(ws.cell("ZZ999").is_none());
+}
+
+#[test]
+fn phase4_round_trip_string() {
+    let path = temp_path("oxlsx_rt_string.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("A1", "Hello");
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::String("Hello".to_string())
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn phase4_round_trip_number() {
+    let path = temp_path("oxlsx_rt_number.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("B1", 42.0_f64);
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("B1").unwrap().value(),
+        &Value::Number(42.0)
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn phase4_round_trip_bool() {
+    let path = temp_path("oxlsx_rt_bool.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("C1", true);
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("C1").unwrap().value(),
+        &Value::Bool(true)
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn phase4_round_trip_bold_font() {
+    let path = temp_path("oxlsx_rt_font.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Bold");
+    ws.set_cell_font(
+        "A1",
+        Font {
+            bold: true,
+            ..Default::default()
+        },
+    );
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(
+        wb2.sheet(0)
+            .unwrap()
+            .cell("A1")
+            .unwrap()
+            .font()
+            .unwrap()
+            .bold
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn phase4_round_trip_fill() {
+    let path = temp_path("oxlsx_rt_fill.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Filled");
+    ws.set_cell_fill(
+        "A1",
+        Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: Some(Color::Argb("FFFF00".to_string())),
+            bg_color: None,
+        },
+    );
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    let fill = wb2.sheet(0).unwrap().cell("A1").unwrap().fill().unwrap();
+    assert_eq!(fill.pattern_type, "solid");
+    assert_eq!(fill.fg_color, Some(Color::Argb("FFFF00".to_string())));
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn phase4_round_trip_multi_sheet() {
+    let path = temp_path("oxlsx_rt_multi.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("A1", "Sheet1");
+    wb.create_sheet("Data").set_cell("A1", "Sheet2");
+    wb.save(&path).unwrap();
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(wb2.sheetnames(), vec!["Sheet", "Data"]);
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::String("Sheet1".to_string())
+    );
+    assert_eq!(
+        wb2.sheet(1).unwrap().cell("A1").unwrap().value(),
+        &Value::String("Sheet2".to_string())
+    );
+    std::fs::remove_file(&path).ok();
 }
