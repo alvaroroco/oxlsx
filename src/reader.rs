@@ -1,10 +1,11 @@
+use crate::workbook_rels::parse_sheet_refs;
 use crate::{Fill, Font, OxlsxError, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::mem;
 use std::path::Path;
 use std::sync::Arc;
@@ -101,16 +102,44 @@ impl Workbook {
             Err(e) => return Err(OxlsxError::Zip(e)),
         };
 
-        let worksheet = {
-            let sheet_file = archive
-                .by_name("xl/worksheets/sheet1.xml")
-                .map_err(|_| OxlsxError::MissingPart("xl/worksheets/sheet1.xml".to_string()))?;
-            parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?
+        let (sheet_refs, active_index) = {
+            let workbook_xml = {
+                let mut wb_file = archive
+                    .by_name("xl/workbook.xml")
+                    .map_err(|_| OxlsxError::MissingPart("xl/workbook.xml".to_string()))?;
+                let mut bytes = Vec::new();
+                wb_file.read_to_end(&mut bytes)?;
+                bytes
+            };
+
+            let rels_xml = {
+                let mut rels_file = archive
+                    .by_name("xl/_rels/workbook.xml.rels")
+                    .map_err(|_| OxlsxError::MissingPart("xl/_rels/workbook.xml.rels".to_string()))?;
+                let mut bytes = Vec::new();
+                rels_file.read_to_end(&mut bytes)?;
+                bytes
+            };
+
+            parse_sheet_refs(
+                BufReader::new(Cursor::new(workbook_xml)),
+                BufReader::new(Cursor::new(rels_xml)),
+            )?
         };
 
+        let mut sheets = Vec::with_capacity(sheet_refs.len());
+        for sheet_ref in &sheet_refs {
+            let sheet_file = archive
+                .by_name(&sheet_ref.zip_path)
+                .map_err(|_| OxlsxError::MissingPart(sheet_ref.zip_path.clone()))?;
+            let mut ws = parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?;
+            ws.name = sheet_ref.name.clone();
+            sheets.push(ws);
+        }
+
         Ok(Self {
-            sheets: vec![worksheet],
-            active_index: 0,
+            sheets,
+            active_index,
         })
     }
 
@@ -561,5 +590,14 @@ mod tests {
         assert!(wb.sheet_by_name("Empleados").is_some());
         assert!(wb.sheet_by_name("NoExiste").is_none());
         assert_eq!(wb.active().unwrap().title(), "Productos");
+    }
+
+    #[test]
+    fn workbook_open_loads_sheet_refs_from_workbook_metadata() {
+        let wb = Workbook::open("samples/multi_sheet.xlsx").unwrap();
+
+        assert_eq!(wb.worksheets().len(), 2);
+        assert_eq!(wb.sheetnames(), vec!["Empleados", "Productos"]);
+        assert_eq!(wb.active().unwrap().title(), "Empleados");
     }
 }

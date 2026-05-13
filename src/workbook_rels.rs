@@ -41,10 +41,8 @@ fn parse_workbook<R: BufRead>(reader: R) -> Result<(Vec<(String, String)>, usize
         match xml.read_event_into(&mut buf)? {
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 b"sheet" => {
-                    if let (Some(name), Some(rel_id)) = (
-                        attr_value(&e, b"name")?,
-                        attr_value(&e, b"r:id")?.or_else(|| attr_value(&e, b"id").ok().flatten()),
-                    ) {
+                    let rel_id = attr_value(&e, b"r:id")?.or(attr_value(&e, b"id")?);
+                    if let (Some(name), Some(rel_id)) = (attr_value(&e, b"name")?, rel_id) {
                         sheet_entries.push((name, rel_id));
                     }
                 }
