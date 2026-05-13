@@ -20,12 +20,50 @@ pub enum Value {
     Date(NaiveDate),
 }
 
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::String(s)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(n: f64) -> Self {
+        Value::Number(n)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(n: i64) -> Self {
+        Value::Number(n as f64)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Value::Bool(b)
+    }
+}
+
+impl From<NaiveDate> for Value {
+    fn from(d: NaiveDate) -> Self {
+        Value::Date(d)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Cell {
     reference: String,
     value: Value,
     style_id: StyleId,
     styles: Arc<StyleSheet>,
+    pub(crate) write_font: Option<Font>,
+    pub(crate) write_fill: Option<Fill>,
 }
 
 impl Cell {
@@ -64,6 +102,13 @@ pub struct Worksheet {
 }
 
 impl Worksheet {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            cells: HashMap::new(),
+        }
+    }
+
     pub fn title(&self) -> &str {
         &self.name
     }
@@ -71,15 +116,71 @@ impl Worksheet {
     pub fn cell(&self, reference: &str) -> Option<&Cell> {
         self.cells.get(reference)
     }
+
+    pub(crate) fn cells(&self) -> &HashMap<String, Cell> {
+        &self.cells
+    }
+
+    pub fn set_cell(&mut self, reference: &str, value: impl Into<Value>) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.value = value.into();
+    }
+
+    pub fn set_cell_font(&mut self, reference: &str, font: Font) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.write_font = Some(font);
+    }
+
+    pub fn set_cell_fill(&mut self, reference: &str, fill: Fill) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.write_fill = Some(fill);
+    }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Workbook {
     sheets: Vec<Worksheet>,
     active_index: usize,
 }
 
 impl Workbook {
+    pub fn new() -> Self {
+        Self {
+            sheets: vec![Worksheet::new("Sheet")],
+            active_index: 0,
+        }
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, OxlsxError> {
         let file = File::open(path)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|err| match err {
@@ -160,8 +261,29 @@ impl Workbook {
         self.sheets.get(self.active_index)
     }
 
+    pub fn active_mut(&mut self) -> Option<&mut Worksheet> {
+        self.sheets.get_mut(self.active_index)
+    }
+
     pub fn sheet(&self, index: usize) -> Option<&Worksheet> {
         self.sheets.get(index)
+    }
+
+    pub fn create_sheet(&mut self, name: &str) -> &mut Worksheet {
+        self.sheets.push(Worksheet::new(name));
+        self.sheets
+            .last_mut()
+            .expect("create_sheet always pushes one worksheet")
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), OxlsxError> {
+        crate::writer::write_xlsx(self, path.as_ref())
+    }
+}
+
+impl Default for Workbook {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -268,6 +390,8 @@ fn parse_sheet<R: BufRead>(
                                 value: builder.value,
                                 style_id: builder.style_id,
                                 styles: styles.clone(),
+                                write_font: None,
+                                write_fill: None,
                             },
                         );
                     }
@@ -317,7 +441,7 @@ fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::{Value, Workbook, Worksheet, parse_sheet};
-    use crate::{OxlsxError, StyleId, StyleSheet};
+    use crate::{Fill, Font, OxlsxError, StyleId, StyleSheet};
     use chrono::NaiveDate;
     use std::collections::HashMap;
     use std::fs;
@@ -325,6 +449,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{stamp}_{name}"))
+    }
 
     const SAMPLE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -459,6 +591,22 @@ mod tests {
     }
 
     #[test]
+    fn value_from_impls_convert_supported_types() {
+        assert_eq!(Value::from("Hola"), Value::String("Hola".to_string()));
+        assert_eq!(
+            Value::from(String::from("Chau")),
+            Value::String("Chau".to_string())
+        );
+        assert_eq!(Value::from(42.5_f64), Value::Number(42.5));
+        assert_eq!(Value::from(7_i64), Value::Number(7.0));
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(
+            Value::from(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap()),
+            Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
+        );
+    }
+
+    #[test]
     fn parses_inline_string_and_boolean_cells() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
@@ -486,6 +634,8 @@ mod tests {
             value: Value::String("Hola".to_string()),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -494,6 +644,8 @@ mod tests {
             value: Value::Number(42.0),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -502,6 +654,8 @@ mod tests {
             value: Value::Bool(true),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -510,6 +664,8 @@ mod tests {
             value: Value::Empty,
             style_id: StyleId(0),
             styles,
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(empty_cell.text(), None);
     }
@@ -591,6 +747,90 @@ mod tests {
         assert!(wb.sheet_by_name("Empleados").is_some());
         assert!(wb.sheet_by_name("NoExiste").is_none());
         assert_eq!(wb.active().unwrap().title(), "Productos");
+    }
+
+    #[test]
+    fn workbook_new_creates_default_sheet() {
+        let wb = Workbook::new();
+
+        assert_eq!(wb.sheet(0).unwrap().title(), "Sheet");
+    }
+
+    #[test]
+    fn workbook_create_sheet_appends_new_sheet() {
+        let mut wb = Workbook::new();
+
+        wb.create_sheet("Data");
+
+        assert_eq!(wb.sheetnames(), vec!["Sheet", "Data"]);
+    }
+
+    #[test]
+    fn workbook_active_mut_returns_some_for_default_workbook() {
+        let mut wb = Workbook::new();
+
+        assert!(wb.active_mut().is_some());
+    }
+
+    #[test]
+    fn workbook_save_writes_xlsx_file() {
+        let mut wb = Workbook::new();
+        wb.active_mut().unwrap().set_cell("A1", "saved");
+        let path = tmp_path("workbook_save_writes_xlsx_file.xlsx");
+
+        wb.save(&path).unwrap();
+
+        assert!(path.exists());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn worksheet_set_cell_sets_string_number_and_bool_values() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell("A1", "Hello");
+        assert_eq!(
+            ws.cell("A1").unwrap().value(),
+            &Value::String("Hello".to_string())
+        );
+
+        ws.set_cell("A1", 42.0_f64);
+        assert_eq!(ws.cell("A1").unwrap().value(), &Value::Number(42.0));
+
+        ws.set_cell("A1", true);
+        assert_eq!(ws.cell("A1").unwrap().value(), &Value::Bool(true));
+    }
+
+    #[test]
+    fn worksheet_set_cell_font_stores_write_font_and_creates_missing_cell() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell_font(
+            "A1",
+            Font {
+                bold: true,
+                ..Default::default()
+            },
+        );
+
+        let cell = ws.cell("A1").unwrap();
+        assert!(cell.write_font.is_some());
+    }
+
+    #[test]
+    fn worksheet_set_cell_fill_stores_write_fill() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell_fill(
+            "A1",
+            Fill {
+                pattern_type: "solid".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let cell = ws.cell("A1").unwrap();
+        assert!(cell.write_fill.is_some());
     }
 
     #[test]

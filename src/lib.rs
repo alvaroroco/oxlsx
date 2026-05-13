@@ -3,6 +3,7 @@ pub mod reader;
 pub mod shared_strings;
 pub mod styles;
 pub mod workbook_rels;
+pub mod writer;
 
 pub use error::OxlsxError;
 pub use reader::Value;
