@@ -62,6 +62,8 @@ pub struct Cell {
     value: Value,
     style_id: StyleId,
     styles: Arc<StyleSheet>,
+    pub(crate) write_font: Option<Font>,
+    pub(crate) write_fill: Option<Fill>,
 }
 
 impl Cell {
@@ -113,6 +115,35 @@ impl Worksheet {
 
     pub fn cell(&self, reference: &str) -> Option<&Cell> {
         self.cells.get(reference)
+    }
+
+    pub fn set_cell(&mut self, reference: &str, value: impl Into<Value>) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+            });
+        cell.value = value.into();
+    }
+
+    pub fn set_cell_font(&mut self, reference: &str, font: Font) {
+        self.set_cell(reference, Value::Empty);
+        if let Some(cell) = self.cells.get_mut(reference) {
+            cell.write_font = Some(font);
+        }
+    }
+
+    pub fn set_cell_fill(&mut self, reference: &str, fill: Fill) {
+        self.set_cell(reference, Value::Empty);
+        if let Some(cell) = self.cells.get_mut(reference) {
+            cell.write_fill = Some(fill);
+        }
     }
 }
 
@@ -335,6 +366,8 @@ fn parse_sheet<R: BufRead>(
                                 value: builder.value,
                                 style_id: builder.style_id,
                                 styles: styles.clone(),
+                                write_font: None,
+                                write_fill: None,
                             },
                         );
                     }
@@ -384,7 +417,7 @@ fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::{Value, Workbook, Worksheet, parse_sheet};
-    use crate::{OxlsxError, StyleId, StyleSheet};
+    use crate::{Fill, Font, OxlsxError, StyleId, StyleSheet};
     use chrono::NaiveDate;
     use std::collections::HashMap;
     use std::fs;
@@ -569,6 +602,8 @@ mod tests {
             value: Value::String("Hola".to_string()),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -577,6 +612,8 @@ mod tests {
             value: Value::Number(42.0),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -585,6 +622,8 @@ mod tests {
             value: Value::Bool(true),
             style_id: StyleId(0),
             styles: styles.clone(),
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -593,6 +632,8 @@ mod tests {
             value: Value::Empty,
             style_id: StyleId(0),
             styles,
+            write_font: None,
+            write_fill: None,
         };
         assert_eq!(empty_cell.text(), None);
     }
@@ -697,6 +738,55 @@ mod tests {
         let mut wb = Workbook::new();
 
         assert!(wb.active_mut().is_some());
+    }
+
+    #[test]
+    fn worksheet_set_cell_sets_string_number_and_bool_values() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell("A1", "Hello");
+        assert_eq!(
+            ws.cell("A1").unwrap().value(),
+            &Value::String("Hello".to_string())
+        );
+
+        ws.set_cell("A1", 42.0_f64);
+        assert_eq!(ws.cell("A1").unwrap().value(), &Value::Number(42.0));
+
+        ws.set_cell("A1", true);
+        assert_eq!(ws.cell("A1").unwrap().value(), &Value::Bool(true));
+    }
+
+    #[test]
+    fn worksheet_set_cell_font_stores_write_font_and_creates_missing_cell() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell_font(
+            "A1",
+            Font {
+                bold: true,
+                ..Default::default()
+            },
+        );
+
+        let cell = ws.cell("A1").unwrap();
+        assert!(cell.write_font.is_some());
+    }
+
+    #[test]
+    fn worksheet_set_cell_fill_stores_write_fill() {
+        let mut ws = Worksheet::new("Data");
+
+        ws.set_cell_fill(
+            "A1",
+            Fill {
+                pattern_type: "solid".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let cell = ws.cell("A1").unwrap();
+        assert!(cell.write_fill.is_some());
     }
 
     #[test]
