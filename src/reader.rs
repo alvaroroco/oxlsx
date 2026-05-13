@@ -20,6 +20,42 @@ pub enum Value {
     Date(NaiveDate),
 }
 
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::String(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::String(s)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(n: f64) -> Self {
+        Value::Number(n)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(n: i64) -> Self {
+        Value::Number(n as f64)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Value::Bool(b)
+    }
+}
+
+impl From<NaiveDate> for Value {
+    fn from(d: NaiveDate) -> Self {
+        Value::Date(d)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Cell {
     reference: String,
@@ -456,6 +492,22 @@ mod tests {
 
         assert_eq!(text, Value::String("Hola".to_string()));
         assert_eq!(boolean, Value::Bool(true));
+    }
+
+    #[test]
+    fn value_from_impls_convert_supported_types() {
+        assert_eq!(Value::from("Hola"), Value::String("Hola".to_string()));
+        assert_eq!(
+            Value::from(String::from("Chau")),
+            Value::String("Chau".to_string())
+        );
+        assert_eq!(Value::from(42.5_f64), Value::Number(42.5));
+        assert_eq!(Value::from(7_i64), Value::Number(7.0));
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(
+            Value::from(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap()),
+            Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
+        );
     }
 
     #[test]
