@@ -9,7 +9,6 @@ use std::path::Path;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-#[allow(dead_code)]
 pub(crate) struct CollectedStyles {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
@@ -18,7 +17,6 @@ pub(crate) struct CollectedStyles {
 }
 
 // Returns (row, col) for sorting cells in sheet XML.
-#[allow(dead_code)]
 pub(crate) fn cell_sort_key(reference: &str) -> (u32, u32) {
     let mut col = 0_u32;
     let mut row_text = String::new();
@@ -36,7 +34,6 @@ pub(crate) fn cell_sort_key(reference: &str) -> (u32, u32) {
     (row, col)
 }
 
-#[allow(dead_code)]
 pub(crate) fn collect_styles(sheets: &[Worksheet]) -> CollectedStyles {
     let styled_cells = sheets
         .iter()
@@ -80,7 +77,6 @@ pub(crate) fn collect_styles(sheets: &[Worksheet]) -> CollectedStyles {
     }
 }
 
-#[allow(dead_code)]
 fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     if let Some(idx) = items.iter().position(|item| item == &value) {
         idx

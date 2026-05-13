@@ -117,7 +117,6 @@ impl Worksheet {
         self.cells.get(reference)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn cells(&self) -> &HashMap<String, Cell> {
         &self.cells
     }
