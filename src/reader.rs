@@ -1,4 +1,5 @@
 use crate::{Fill, Font, OxlsxError, SharedStrings, StyleId, StyleSheet};
+use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub enum Value {
     String(String),
     Number(f64),
     Bool(bool),
+    Date(NaiveDate),
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +171,7 @@ fn parse_sheet<R: BufRead>(
             Event::End(e) if e.local_name().as_ref() == b"v" => {
                 in_value = false;
                 if let Some(builder) = current.as_mut() {
-                    builder.value = match builder.cell_type.as_str() {
+                    let mut value = match builder.cell_type.as_str() {
                         "s" => text
                             .parse::<usize>()
                             .ok()
@@ -182,6 +184,16 @@ fn parse_sheet<R: BufRead>(
                             .map(Value::Number)
                             .unwrap_or(Value::Empty),
                     };
+
+                    if let Value::Number(n) = value {
+                        if styles.is_date_format(builder.style_id) {
+                            value = excel_serial_to_date(n)
+                                .map(Value::Date)
+                                .unwrap_or(Value::Number(n));
+                        }
+                    }
+
+                    builder.value = value;
                 }
             }
             Event::End(e) if e.local_name().as_ref() == b"t" => {
@@ -240,10 +252,17 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
     Ok(None)
 }
 
+fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
+    let epoch = NaiveDate::from_ymd_opt(1899, 12, 30)?;
+    let days = serial as i64;
+    epoch.checked_add_signed(Duration::days(days))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Value, Workbook, parse_sheet};
     use crate::{OxlsxError, StyleId, StyleSheet};
+    use chrono::NaiveDate;
     use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -272,6 +291,24 @@ mod tests {
   </sheetData>
 </worksheet>"#;
 
+    const DATE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="B1" s="2"><v>45678</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
+    const NON_DATE_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="C1" s="0"><v>42</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="3">
@@ -285,10 +322,13 @@ mod tests {
     <fill><patternFill patternType="solid"><fgColor indexed="2"/><bgColor indexed="2"/></patternFill></fill>
     <fill><patternFill patternType="solid"><fgColor indexed="5"/><bgColor indexed="5"/></patternFill></fill>
   </fills>
+  <numFmts count="1">
+    <numFmt numFmtId="164" formatCode="dd/mm/yyyy"/>
+  </numFmts>
   <cellXfs count="3">
-    <xf fontId="0" fillId="0"/>
-    <xf fontId="1" fillId="2"/>
-    <xf fontId="2" fillId="3"/>
+    <xf fontId="0" fillId="0" numFmtId="0"/>
+    <xf fontId="1" fillId="2" numFmtId="14"/>
+    <xf fontId="2" fillId="3" numFmtId="164"/>
   </cellXfs>
 </styleSheet>"#;
 
@@ -437,5 +477,38 @@ mod tests {
         fs::remove_file(&path).unwrap();
 
         assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn excel_serial_to_date_maps_known_serials() {
+        assert_eq!(
+            super::excel_serial_to_date(45678.0),
+            NaiveDate::from_ymd_opt(2025, 1, 21)
+        );
+        assert_eq!(
+            super::excel_serial_to_date(1.0),
+            NaiveDate::from_ymd_opt(1899, 12, 31)
+        );
+    }
+
+    #[test]
+    fn parse_sheet_converts_numeric_date_by_style() {
+        let styles =
+            Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
+        let ws = parse_sheet(Cursor::new(DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
+
+        assert_eq!(
+            ws.cell("B1").unwrap().value(),
+            &Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_sheet_keeps_non_date_numbers_unchanged() {
+        let styles =
+            Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
+        let ws = parse_sheet(Cursor::new(NON_DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
+
+        assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
     }
 }
