@@ -117,11 +117,11 @@ Measured against openpyxl 3.1.5 on the same 10k-row file (5 columns, mixed types
 
 | Operation | openpyxl | oxlsx | Notes |
 |-----------|:--------:|:-----:|-------|
-| Metadata only | 1.1ms | 21ms | oxlsx loads eagerly — Phase 5 fixes this |
+| Metadata only | 1.1ms | 21ms | oxlsx loads eagerly — `open_readonly()` in Phase 5 fixes this |
 | Iterate all cells | 144.7ms | 25.5ms | **5.7x faster** |
 | Style resolution | — | **1.5ns** | `Arc<StyleSheet>` lookup |
 
-> Read metadata will improve dramatically in Phase 5 (lazy/streaming reader).
+> Read metadata will improve dramatically in Phase 5 (`open_readonly()` streaming reader).
 
 Run benchmarks yourself:
 ```bash
@@ -174,10 +174,11 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 
 ### 🔲 Planned
 
-- [ ] **Phase 5 — Lazy / streaming reader**
-  - Iterator-based row streaming (`ws.rows()`)
-  - Parse cells on demand — don't load full sheet into HashMap at open time
-  - Target: beat openpyxl on metadata-only read (currently 21ms vs 1.1ms)
+- [ ] **Phase 5 — `open_readonly()` streaming reader**
+  - `Workbook::open_readonly(path)` — mirrors openpyxl's `read_only=True`
+  - `ws.rows()` iterator — streaming SAX, no HashMap, no random access
+  - Lazy cell parsing: parse on demand, not at open time
+  - Target: metadata 21ms → ~1ms — beat openpyxl on **all** benchmarks
   - Required for files > 100k rows within the 50MB memory target
 
 - [ ] **Phase 6 — PyO3 Python bindings**

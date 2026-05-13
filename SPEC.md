@@ -58,11 +58,21 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 5. `wb.save(path)` — valid `.xlsx` with all required OOXML parts
 6. Style deduplication on save; inline strings (`t="inlineStr"`)
 
-### 🔲 Phase 5 — Lazy / Streaming Reader
-1. Iterator-based row streaming: `ws.rows() -> impl Iterator<Item = Row>`
-2. Parse cells on demand — no full HashMap load at open time
-3. Target: beat openpyxl on metadata-only read (currently 21ms vs 1.1ms)
-4. Required for 100k+ rows within the 50MB memory target
+### 🔲 Phase 5 — `open_readonly()` Streaming Reader
+**Decision**: Option A — fiel a openpyxl. `open_readonly()` expone solo `ws.rows()`, sin `ws.cell("A1")`.
+
+| Mode | `ws.cell("A1")` | `ws.rows()` | Metadata speed |
+|------|:-:|:-:|:-:|
+| `Workbook::open()` (current) | ✅ | ❌ | 21ms (eager) |
+| `Workbook::open_readonly()` (Phase 5) | ❌ | ✅ | ~1ms (lazy) |
+
+1. `Workbook::open_readonly(path) -> Result<ReadonlyWorkbook, OxlsxError>`
+2. `ReadonlyWorkbook::sheet(0) -> Option<&ReadonlyWorksheet>`
+3. `ReadonlyWorkbook::sheetnames() -> Vec<&str>`
+4. `ReadonlyWorksheet::rows() -> impl Iterator<Item = Vec<Cell>>`
+5. Parse cells on demand — no HashMap, stream directly from ZIP entry
+6. Styles and shared strings still parsed eagerly (small, needed for every cell)
+7. Target: metadata 21ms → ~1ms, beat openpyxl on ALL benchmarks
 
 ### 🔲 Phase 6 — PyO3 Python Bindings
 1. `#[pyclass]` / `#[pymethods]` on all public structs
