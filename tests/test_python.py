@@ -270,3 +270,83 @@ def test_write_merge_cells(new_wb):
         assert '<mergeCell ref="A1:C1"' in sheet_xml
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — Iteration API
+# ---------------------------------------------------------------------------
+
+
+def test_max_row(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    assert wb.active.max_row == 1
+
+
+def test_max_column(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    assert wb.active.max_column == 3
+
+
+def test_min_row(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    assert wb.active.min_row == 1
+
+
+def test_min_column(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    assert wb.active.min_column == 1
+
+
+def test_iter_rows_values_only(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    rows = list(wb.active.iter_rows(min_row=1, max_row=1, values_only=True))
+    assert len(rows) == 1
+    assert rows[0][0] == "Hola"
+    assert rows[0][2] == 42
+
+
+def test_iter_rows_all_values_only(load_wb):
+    # No bounds → all data rows
+    wb = load_wb("samples/multi_sheet.xlsx")
+    rows = list(wb["Empleados"].iter_rows(values_only=True))
+    assert len(rows) == 1
+    assert rows[0][0] == "Juan"
+
+
+def test_iter_rows_returns_cells(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    rows = list(wb.active.iter_rows(min_row=1, max_row=1, values_only=False))
+    assert len(rows) == 1
+    # each element is a cell-like object with .value
+    assert rows[0][0].value == "Hola"
+
+
+def test_iter_cols_values_only(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    cols = list(wb.active.iter_cols(min_col=1, max_col=1, values_only=True))
+    assert len(cols) == 1
+    assert cols[0][0] == "Hola"
+
+
+def test_iter_cols_all_values_only(load_wb):
+    wb = load_wb("samples/multi_sheet.xlsx")
+    cols = list(wb["Empleados"].iter_cols(values_only=True))
+    assert len(cols) == 2
+    assert cols[0][0] == "Juan"
+
+
+def test_ws_values(load_wb):
+    # ws.values → generator of row tuples (values only)
+    wb = load_wb("samples/test.xlsx")
+    rows = list(wb.active.values)
+    assert len(rows) == 1
+    assert rows[0][0] == "Hola"
+    assert rows[0][2] == 42
+
+
+def test_ws_rows_property(load_wb):
+    # ws.rows → generator of cell tuples
+    wb = load_wb("samples/test.xlsx")
+    rows = list(wb.active.rows)
+    assert len(rows) == 1
+    assert rows[0][0].value == "Hola"
