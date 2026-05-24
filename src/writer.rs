@@ -65,6 +65,15 @@ pub(crate) fn collect_styles(
                     font_id: 0,
                     fill_id: 0,
                     num_fmt_id: 0,
+                    border_id: 0,
+                    alignment: None,
+                    protection: None,
+                    apply_font: false,
+                    apply_fill: false,
+                    apply_border: false,
+                    apply_number_format: false,
+                    apply_alignment: false,
+                    apply_protection: false,
                 }],
                 Vec::new(),
             )
@@ -99,6 +108,15 @@ pub(crate) fn collect_styles(
                     font_id: 0,
                     fill_id: 0,
                     num_fmt_id: 0,
+                    border_id: 0,
+                    alignment: None,
+                    protection: None,
+                    apply_font: false,
+                    apply_fill: false,
+                    apply_border: false,
+                    apply_number_format: false,
+                    apply_alignment: false,
+                    apply_protection: false,
                 });
 
             let font = match &cell.write_font {
@@ -124,6 +142,15 @@ pub(crate) fn collect_styles(
                     font_id: font_idx,
                     fill_id: fill_idx,
                     num_fmt_id: base_xf.num_fmt_id,
+                    border_id: base_xf.border_id,
+                    alignment: base_xf.alignment.clone(),
+                    protection: base_xf.protection.clone(),
+                    apply_font: base_xf.apply_font || cell.write_font.is_some(),
+                    apply_fill: base_xf.apply_fill || cell.write_fill.is_some(),
+                    apply_border: base_xf.apply_border,
+                    apply_number_format: base_xf.apply_number_format,
+                    apply_alignment: base_xf.apply_alignment,
+                    apply_protection: base_xf.apply_protection,
                 },
             ) as u32;
 
@@ -150,6 +177,15 @@ pub(crate) fn collect_styles(
                     font_id: 0,
                     fill_id: 0,
                     num_fmt_id: 0,
+                    border_id: 0,
+                    alignment: None,
+                    protection: None,
+                    apply_font: false,
+                    apply_fill: false,
+                    apply_border: false,
+                    apply_number_format: false,
+                    apply_alignment: false,
+                    apply_protection: false,
                 });
 
             if is_builtin_date_num_fmt(existing_xf.num_fmt_id) {
@@ -162,6 +198,15 @@ pub(crate) fn collect_styles(
                     font_id: existing_xf.font_id,
                     fill_id: existing_xf.fill_id,
                     num_fmt_id: 14,
+                    border_id: existing_xf.border_id,
+                    alignment: existing_xf.alignment.clone(),
+                    protection: existing_xf.protection.clone(),
+                    apply_font: existing_xf.apply_font,
+                    apply_fill: existing_xf.apply_fill,
+                    apply_border: existing_xf.apply_border,
+                    apply_number_format: true,
+                    apply_alignment: existing_xf.apply_alignment,
+                    apply_protection: existing_xf.apply_protection,
                 },
             ) as u32;
             cell_style_ids.insert(style_key, style_id);

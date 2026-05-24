@@ -13,4 +13,6 @@ pub use reader::Value;
 pub use reader::{Cell, Workbook, Worksheet};
 pub use readonly::{ReadonlyWorkbook, ReadonlyWorksheet, RowIter};
 pub use shared_strings::SharedStrings;
-pub use styles::{Color, Fill, Font, StyleId, StyleSheet};
+pub use styles::{
+    Alignment, Border, CellXf, Color, Fill, Font, Protection, Side, StyleId, StyleSheet,
+};

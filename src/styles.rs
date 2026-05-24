@@ -87,10 +87,230 @@ impl Default for Font {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alignment {
+    pub horizontal: Option<String>,
+    pub vertical: Option<String>,
+    pub wrap_text: bool,
+    pub indent: u32,
+}
+
+impl Default for Alignment {
+    fn default() -> Self {
+        Self {
+            horizontal: None,
+            vertical: None,
+            wrap_text: false,
+            indent: 0,
+        }
+    }
+}
+
+impl Alignment {
+    pub(crate) fn to_xml_attributes(&self) -> HashMap<String, String> {
+        let mut attrs = HashMap::new();
+        if let Some(horizontal) = &self.horizontal {
+            attrs.insert("horizontal".to_string(), horizontal.clone());
+        }
+        if let Some(vertical) = &self.vertical {
+            attrs.insert("vertical".to_string(), vertical.clone());
+        }
+        if self.wrap_text {
+            attrs.insert("wrapText".to_string(), "1".to_string());
+        }
+        if self.indent > 0 {
+            attrs.insert("indent".to_string(), self.indent.to_string());
+        }
+        attrs
+    }
+
+    pub(crate) fn from_xml_attributes(attrs: &HashMap<String, String>) -> Self {
+        Self {
+            horizontal: attrs.get("horizontal").cloned(),
+            vertical: attrs.get("vertical").cloned(),
+            wrap_text: parse_bool_like(attrs.get("wrapText").map(String::as_str)),
+            indent: attrs
+                .get("indent")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Side {
+    pub style: Option<String>,
+    pub color: Option<Color>,
+}
+
+impl Side {
+    pub(crate) fn to_xml_parts(&self) -> (Option<String>, Option<Color>) {
+        (self.style.clone(), self.color.clone())
+    }
+
+    pub(crate) fn from_xml_parts(style: Option<&str>, color: Option<&Color>) -> Self {
+        Self {
+            style: style.map(str::to_owned),
+            color: color.cloned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Border {
+    pub left: Side,
+    pub right: Side,
+    pub top: Side,
+    pub bottom: Side,
+    pub diagonal: Side,
+}
+
+impl Border {
+    pub(crate) fn to_xml_sides(&self) -> HashMap<String, Side> {
+        HashMap::from([
+            ("left".to_string(), self.left.clone()),
+            ("right".to_string(), self.right.clone()),
+            ("top".to_string(), self.top.clone()),
+            ("bottom".to_string(), self.bottom.clone()),
+            ("diagonal".to_string(), self.diagonal.clone()),
+        ])
+    }
+
+    pub(crate) fn from_xml_sides(sides: &HashMap<String, Side>) -> Self {
+        Self {
+            left: sides.get("left").cloned().unwrap_or_default(),
+            right: sides.get("right").cloned().unwrap_or_default(),
+            top: sides.get("top").cloned().unwrap_or_default(),
+            bottom: sides.get("bottom").cloned().unwrap_or_default(),
+            diagonal: sides.get("diagonal").cloned().unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Protection {
+    pub locked: bool,
+    pub hidden: bool,
+}
+
+impl Default for Protection {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            hidden: false,
+        }
+    }
+}
+
+impl Protection {
+    pub(crate) fn to_xml_attributes(&self) -> HashMap<String, String> {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "locked".to_string(),
+            if self.locked { "1" } else { "0" }.to_string(),
+        );
+        attrs.insert(
+            "hidden".to_string(),
+            if self.hidden { "1" } else { "0" }.to_string(),
+        );
+        attrs
+    }
+
+    pub(crate) fn from_xml_attributes(attrs: &HashMap<String, String>) -> Self {
+        let mut protection = Self::default();
+        if let Some(locked) = attrs.get("locked") {
+            protection.locked = parse_bool_like(Some(locked.as_str()));
+        }
+        if let Some(hidden) = attrs.get("hidden") {
+            protection.hidden = parse_bool_like(Some(hidden.as_str()));
+        }
+        protection
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellXf {
     pub font_id: u32,
     pub fill_id: u32,
     pub num_fmt_id: u32,
+    pub border_id: u32,
+    pub alignment: Option<Alignment>,
+    pub protection: Option<Protection>,
+    pub apply_font: bool,
+    pub apply_fill: bool,
+    pub apply_border: bool,
+    pub apply_number_format: bool,
+    pub apply_alignment: bool,
+    pub apply_protection: bool,
+}
+
+impl CellXf {
+    pub(crate) fn to_xml_attributes(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("fontId".to_string(), self.font_id.to_string()),
+            ("fillId".to_string(), self.fill_id.to_string()),
+            ("numFmtId".to_string(), self.num_fmt_id.to_string()),
+            ("borderId".to_string(), self.border_id.to_string()),
+            (
+                "applyFont".to_string(),
+                if self.apply_font { "1" } else { "0" }.to_string(),
+            ),
+            (
+                "applyFill".to_string(),
+                if self.apply_fill { "1" } else { "0" }.to_string(),
+            ),
+            (
+                "applyBorder".to_string(),
+                if self.apply_border { "1" } else { "0" }.to_string(),
+            ),
+            (
+                "applyNumberFormat".to_string(),
+                if self.apply_number_format { "1" } else { "0" }.to_string(),
+            ),
+            (
+                "applyAlignment".to_string(),
+                if self.apply_alignment { "1" } else { "0" }.to_string(),
+            ),
+            (
+                "applyProtection".to_string(),
+                if self.apply_protection { "1" } else { "0" }.to_string(),
+            ),
+        ])
+    }
+
+    pub(crate) fn from_xml_attributes(
+        attrs: &HashMap<String, String>,
+        alignment: Option<Alignment>,
+        protection: Option<Protection>,
+    ) -> Self {
+        Self {
+            font_id: attrs
+                .get("fontId")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+            fill_id: attrs
+                .get("fillId")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+            num_fmt_id: attrs
+                .get("numFmtId")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+            border_id: attrs
+                .get("borderId")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+            apply_font: parse_bool_like(attrs.get("applyFont").map(String::as_str)),
+            apply_fill: parse_bool_like(attrs.get("applyFill").map(String::as_str)),
+            apply_border: parse_bool_like(attrs.get("applyBorder").map(String::as_str)),
+            apply_number_format: parse_bool_like(
+                attrs.get("applyNumberFormat").map(String::as_str),
+            ),
+            apply_alignment: parse_bool_like(attrs.get("applyAlignment").map(String::as_str)),
+            apply_protection: parse_bool_like(attrs.get("applyProtection").map(String::as_str)),
+            alignment,
+            protection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -178,6 +398,35 @@ impl StyleSheet {
                             num_fmt_id: attr_value(&e, b"numFmtId")?
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0),
+                            border_id: attr_value(&e, b"borderId")?
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(0),
+                            alignment: None,
+                            protection: None,
+                            apply_font: attr_value(&e, b"applyFont")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_fill: attr_value(&e, b"applyFill")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_border: attr_value(&e, b"applyBorder")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_number_format: attr_value(&e, b"applyNumberFormat")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_alignment: attr_value(&e, b"applyAlignment")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_protection: attr_value(&e, b"applyProtection")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
                         });
                     }
                     b"numFmt" if in_num_fmts => {
@@ -223,6 +472,35 @@ impl StyleSheet {
                             num_fmt_id: attr_value(&e, b"numFmtId")?
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0),
+                            border_id: attr_value(&e, b"borderId")?
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(0),
+                            alignment: None,
+                            protection: None,
+                            apply_font: attr_value(&e, b"applyFont")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_fill: attr_value(&e, b"applyFill")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_border: attr_value(&e, b"applyBorder")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_number_format: attr_value(&e, b"applyNumberFormat")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_alignment: attr_value(&e, b"applyAlignment")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
+                            apply_protection: attr_value(&e, b"applyProtection")
+                                .ok()
+                                .flatten()
+                                .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
                         });
                     }
                     b"numFmt" if in_num_fmts => {
@@ -328,9 +606,13 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     Ok(None)
 }
 
+fn parse_bool_like(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "True"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Color, StyleId, StyleSheet};
+    use super::{Alignment, Border, CellXf, Color, Protection, Side, StyleId, StyleSheet};
     use std::io::Cursor;
 
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -391,5 +673,96 @@ mod tests {
         assert!(sheet.is_date_format(StyleId(2)));
         assert!(!sheet.is_date_format(StyleId(0)));
         assert!(!sheet.is_date_format(StyleId(3)));
+    }
+
+    #[test]
+    fn alignment_default_and_round_trip() {
+        let alignment = Alignment::default();
+        assert_eq!(alignment.horizontal, None);
+        assert_eq!(alignment.vertical, None);
+        assert!(!alignment.wrap_text);
+        assert_eq!(alignment.indent, 0);
+
+        let attrs = alignment.to_xml_attributes();
+        let reparsed = Alignment::from_xml_attributes(&attrs);
+        assert_eq!(reparsed, alignment);
+    }
+
+    #[test]
+    fn side_color_round_trip() {
+        let side = Side {
+            style: Some("thin".to_string()),
+            color: Some(Color::Theme(3)),
+        };
+
+        let (style, color) = side.to_xml_parts();
+        let reparsed = Side::from_xml_parts(style.as_deref(), color.as_ref());
+        assert_eq!(reparsed, side);
+    }
+
+    #[test]
+    fn border_round_trip_preserves_sides() {
+        let border = Border {
+            left: Side {
+                style: Some("thin".to_string()),
+                color: Some(Color::Indexed(4)),
+            },
+            right: Side {
+                style: Some("double".to_string()),
+                color: Some(Color::Argb("FFFF0000".to_string())),
+            },
+            top: Side::default(),
+            bottom: Side {
+                style: Some("dashed".to_string()),
+                color: Some(Color::Theme(2)),
+            },
+            diagonal: Side::default(),
+        };
+
+        let serialized = border.to_xml_sides();
+        let reparsed = Border::from_xml_sides(&serialized);
+        assert_eq!(reparsed, border);
+    }
+
+    #[test]
+    fn protection_round_trip_preserves_flags() {
+        let protection = Protection {
+            locked: false,
+            hidden: true,
+        };
+
+        let attrs = protection.to_xml_attributes();
+        let reparsed = Protection::from_xml_attributes(&attrs);
+        assert_eq!(reparsed, protection);
+    }
+
+    #[test]
+    fn cellxfs_apply_flags_round_trip() {
+        let xf = CellXf {
+            font_id: 1,
+            fill_id: 2,
+            num_fmt_id: 164,
+            border_id: 3,
+            alignment: Some(Alignment {
+                horizontal: Some("center".to_string()),
+                vertical: Some("top".to_string()),
+                wrap_text: true,
+                indent: 1,
+            }),
+            protection: Some(Protection {
+                locked: false,
+                hidden: true,
+            }),
+            apply_font: true,
+            apply_fill: false,
+            apply_border: true,
+            apply_number_format: true,
+            apply_alignment: true,
+            apply_protection: true,
+        };
+
+        let attrs = xf.to_xml_attributes();
+        let reparsed = CellXf::from_xml_attributes(&attrs, xf.alignment.clone(), xf.protection.clone());
+        assert_eq!(reparsed, xf);
     }
 }
