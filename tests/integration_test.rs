@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
 use std::env;
+use std::fs;
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     env::temp_dir().join(name)
@@ -254,4 +255,123 @@ fn readonly_streaming_style_resolution() {
         first_row[1].fill().unwrap().fg_color,
         Some(Color::Indexed(5))
     );
+}
+
+#[test]
+fn rmw_modify_string_cell() {
+    let path = temp_path("oxlsx_rmw_modify_string.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut().unwrap().set_cell("A1", "Modified");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::String("Modified".to_string())
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_modify_number_cell() {
+    let path = temp_path("oxlsx_rmw_modify_number.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut().unwrap().set_cell("C1", 99.0_f64);
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("C1").unwrap().value(),
+        &Value::Number(99.0)
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_add_new_cell() {
+    let path = temp_path("oxlsx_rmw_add_new_cell.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut().unwrap().set_cell("D1", "New");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("D1").unwrap().value(),
+        &Value::String("New".to_string())
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_preserves_other_cells() {
+    let path = temp_path("oxlsx_rmw_preserve_other_cells.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut().unwrap().set_cell("A1", "Changed");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("B1").unwrap().value(),
+        &Value::String("Hola".to_string())
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_preserves_unmodified_styles() {
+    let path = temp_path("oxlsx_rmw_preserve_styles.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut().unwrap().set_cell("C1", 99.0_f64);
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(
+        wb2.sheet(0)
+            .unwrap()
+            .cell("A1")
+            .unwrap()
+            .font()
+            .unwrap()
+            .bold
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_multi_sheet_modify() {
+    let path = temp_path("oxlsx_rmw_multi_sheet.xlsx");
+    let mut wb = Workbook::open("samples/multi_sheet.xlsx").unwrap();
+    wb.sheet_mut(0).unwrap().set_cell("A1", "Pedro");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(1).unwrap().cell("A1").unwrap().value(),
+        &Value::String("Laptop".to_string())
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rmw_save_to_same_path() {
+    let path = temp_path("oxlsx_rmw_same_path.xlsx");
+    fs::copy("samples/test.xlsx", &path).unwrap();
+
+    let mut wb = Workbook::open(&path).unwrap();
+    wb.active_mut().unwrap().set_cell("A1", "SamePath");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::String("SamePath".to_string())
+    );
+
+    fs::remove_file(path).ok();
 }
