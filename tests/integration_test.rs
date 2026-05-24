@@ -382,8 +382,14 @@ fn append_row_list() {
         Value::Number(42.0),
     ]));
 
-    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("A".to_string()));
-    assert_eq!(ws.cell("B1").unwrap().value(), &Value::String("B".to_string()));
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::String("A".to_string())
+    );
+    assert_eq!(
+        ws.cell("B1").unwrap().value(),
+        &Value::String("B".to_string())
+    );
     assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
 }
 
@@ -397,9 +403,15 @@ fn append_row_dict_letters() {
         (3, Value::String("right".to_string())),
     ]));
 
-    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("left".to_string()));
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::String("left".to_string())
+    );
     assert!(ws.cell("B1").is_none());
-    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("right".to_string()));
+    assert_eq!(
+        ws.cell("C1").unwrap().value(),
+        &Value::String("right".to_string())
+    );
 }
 
 #[test]
@@ -407,11 +419,20 @@ fn append_row_dict_indices() {
     let mut wb = Workbook::new();
     let ws = wb.active_mut().unwrap();
 
-    ws.append(Row::Sparse(vec![(1, Value::String("x".to_string())), (3, Value::String("y".to_string()))]));
+    ws.append(Row::Sparse(vec![
+        (1, Value::String("x".to_string())),
+        (3, Value::String("y".to_string())),
+    ]));
 
-    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("x".to_string()));
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::String("x".to_string())
+    );
     assert!(ws.cell("B1").is_none());
-    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("y".to_string()));
+    assert_eq!(
+        ws.cell("C1").unwrap().value(),
+        &Value::String("y".to_string())
+    );
 }
 
 #[test]
@@ -424,8 +445,14 @@ fn insert_rows_shifts_data() {
     ws.insert_rows(1, 2);
 
     assert!(ws.cell("A1").is_none());
-    assert_eq!(ws.cell("A3").unwrap().value(), &Value::String("top".to_string()));
-    assert_eq!(ws.cell("A4").unwrap().value(), &Value::String("bottom".to_string()));
+    assert_eq!(
+        ws.cell("A3").unwrap().value(),
+        &Value::String("top".to_string())
+    );
+    assert_eq!(
+        ws.cell("A4").unwrap().value(),
+        &Value::String("bottom".to_string())
+    );
 }
 
 #[test]
@@ -438,8 +465,14 @@ fn delete_rows_removes_data() {
 
     ws.delete_rows(2, 1);
 
-    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("r1".to_string()));
-    assert_eq!(ws.cell("A2").unwrap().value(), &Value::String("r3".to_string()));
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::String("r1".to_string())
+    );
+    assert_eq!(
+        ws.cell("A2").unwrap().value(),
+        &Value::String("r3".to_string())
+    );
     assert!(ws.cell("A3").is_none());
 }
 
@@ -453,8 +486,14 @@ fn insert_cols_shifts_data() {
     ws.insert_cols(1, 2);
 
     assert!(ws.cell("A1").is_none());
-    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("left".to_string()));
-    assert_eq!(ws.cell("D1").unwrap().value(), &Value::String("right".to_string()));
+    assert_eq!(
+        ws.cell("C1").unwrap().value(),
+        &Value::String("left".to_string())
+    );
+    assert_eq!(
+        ws.cell("D1").unwrap().value(),
+        &Value::String("right".to_string())
+    );
 }
 
 #[test]
@@ -467,8 +506,14 @@ fn delete_cols_removes_data() {
 
     ws.delete_cols(2, 1);
 
-    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("a".to_string()));
-    assert_eq!(ws.cell("B1").unwrap().value(), &Value::String("c".to_string()));
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::String("a".to_string())
+    );
+    assert_eq!(
+        ws.cell("B1").unwrap().value(),
+        &Value::String("c".to_string())
+    );
     assert!(ws.cell("C1").is_none());
 }
 
@@ -485,8 +530,14 @@ fn move_range_overwrites_destination() {
 
     assert!(ws.cell("A1").is_none());
     assert!(ws.cell("B1").is_none());
-    assert_eq!(ws.cell("B2").unwrap().value(), &Value::String("s1".to_string()));
-    assert_eq!(ws.cell("C2").unwrap().value(), &Value::String("s2".to_string()));
+    assert_eq!(
+        ws.cell("B2").unwrap().value(),
+        &Value::String("s1".to_string())
+    );
+    assert_eq!(
+        ws.cell("C2").unwrap().value(),
+        &Value::String("s2".to_string())
+    );
 }
 
 #[test]
@@ -509,7 +560,10 @@ fn append_updates_dimensions() {
     let ws = wb.active_mut().unwrap();
 
     ws.set_cell("A1", "x");
-    ws.append(Row::Ordered(vec![Value::String("y".to_string()), Value::String("z".to_string())]));
+    ws.append(Row::Ordered(vec![
+        Value::String("y".to_string()),
+        Value::String("z".to_string()),
+    ]));
 
     assert_eq!(ws.max_row(), 2);
     assert_eq!(ws.max_column(), 2);

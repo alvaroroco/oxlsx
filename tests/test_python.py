@@ -350,3 +350,181 @@ def test_ws_rows_property(load_wb):
     rows = list(wb.active.rows)
     assert len(rows) == 1
     assert rows[0][0].value == "Hola"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 — Bulk write / structural ops
+# ---------------------------------------------------------------------------
+
+
+def test_append_list(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+
+    ws.append(["A", "B", 42])
+
+    assert ws["A1"].value == "A"
+    assert ws["B1"].value == "B"
+    assert ws["C1"].value == 42
+
+
+def test_append_dict_letters(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+
+    ws.append({"A": "left", "C": "right"})
+
+    assert ws["A1"].value == "left"
+    assert ws["B1"].value is None
+    assert ws["C1"].value == "right"
+
+
+def test_append_dict_indices(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+
+    ws.append({1: "left", 3: "right"})
+
+    assert ws["A1"].value == "left"
+    assert ws["B1"].value is None
+    assert ws["C1"].value == "right"
+
+
+def test_insert_rows(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "top"
+    ws["A2"] = "bottom"
+
+    ws.insert_rows(1, 2)
+
+    assert ws["A1"].value is None
+    assert ws["A3"].value == "top"
+    assert ws["A4"].value == "bottom"
+
+
+def test_delete_rows(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "r1"
+    ws["A2"] = "r2"
+    ws["A3"] = "r3"
+
+    ws.delete_rows(2, 1)
+
+    assert ws["A1"].value == "r1"
+    assert ws["A2"].value == "r3"
+    assert ws["A3"].value is None
+
+
+def test_insert_cols(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "left"
+    ws["B1"] = "right"
+
+    ws.insert_cols(1, 2)
+
+    assert ws["A1"].value is None
+    assert ws["C1"].value == "left"
+    assert ws["D1"].value == "right"
+
+
+def test_delete_cols(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "a"
+    ws["B1"] = "b"
+    ws["C1"] = "c"
+
+    ws.delete_cols(2, 1)
+
+    assert ws["A1"].value == "a"
+    assert ws["B1"].value == "c"
+    assert ws["C1"].value is None
+
+
+def test_move_range(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "s1"
+    ws["B1"] = "s2"
+    ws["B2"] = "old"
+
+    ws.move_range("A1:B1", rows=1, cols=1)
+
+    assert ws["A1"].value is None
+    assert ws["B1"].value is None
+    assert ws["B2"].value == "s1"
+    assert ws["C2"].value == "s2"
+
+
+def test_move_range_does_not_translate_formulas(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "=SUM(B1:B3)"
+
+    ws.move_range("A1:A1", rows=1, cols=1, translate=False)
+
+    assert ws["B2"].value == "=SUM(B1:B3)"
+
+
+def test_move_range_translate_true_not_implemented(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "=SUM(B1:B3)"
+
+    if type(wb).__module__.startswith("openpyxl"):
+        ws.move_range("A1:A1", rows=1, cols=1, translate=True)
+        return
+
+    with pytest.raises(NotImplementedError):
+        ws.move_range("A1:A1", rows=1, cols=1, translate=True)
+
+
+def test_append_updates_bounds(new_wb):
+    wb, _ = new_wb
+    ws = wb.active
+    ws["A1"] = "x"
+
+    ws.append(["y", "z"])
+
+    assert ws.max_row == 2
+    assert ws.max_column == 2
+    rows = list(ws.iter_rows(values_only=True))
+    assert len(rows) == 2
+
+
+def test_layout_metadata_shifts(new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws.merge_cells("A1:B1")
+    if type(wb).__module__.startswith("openpyxl"):
+        ws.column_dimensions["B"].width = 20
+        ws.row_dimensions[2].height = 30
+    else:
+        ws.column_width(2, 20)
+        ws.row_height(2, 30)
+
+    ws.insert_rows(1, 1)
+    ws.insert_cols(1, 1)
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        save(path)
+        with zipfile.ZipFile(path, "r") as zf:
+            sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+        if type(wb).__module__.startswith("openpyxl"):
+            assert '<mergeCell ref="A1:B1"' in sheet_xml
+            assert 'min="2" max="2"' in sheet_xml
+            assert 'width="20' in sheet_xml
+            assert '<row r="2" ht="30' in sheet_xml
+        else:
+            assert '<mergeCell ref="B2:C2"' in sheet_xml
+            assert '<col min="3" max="3" width="20' in sheet_xml
+            assert '<row r="3" ht="30' in sheet_xml
+    finally:
+        os.unlink(path)

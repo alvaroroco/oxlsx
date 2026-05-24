@@ -92,6 +92,31 @@ pub(crate) fn shift_range(range: &str, drow: i32, dcol: i32) -> Option<String> {
     Some(format!("{shifted_start}:{shifted_end}"))
 }
 
+#[cfg(feature = "python")]
+pub(crate) enum ColumnKey<'a> {
+    Letters(&'a str),
+    Index(u32),
+}
+
+#[cfg(feature = "python")]
+pub(crate) fn column_from_key(key: ColumnKey<'_>) -> Option<u32> {
+    match key {
+        ColumnKey::Letters(letters) => {
+            if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return None;
+            }
+            column_index(letters)
+        }
+        ColumnKey::Index(index) => {
+            if index == 0 {
+                None
+            } else {
+                Some(index)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -116,12 +141,18 @@ mod tests {
         assert_eq!(super::parse_range("A1:C3"), Some(((1, 1), (3, 3))));
         assert_eq!(super::parse_range("C3:A1"), Some(((1, 1), (3, 3))));
         assert_eq!(super::shift_a1("B2", 2, 3), Some("E4".to_string()));
-        assert_eq!(
-            super::shift_range("A1:B2", 1, 1),
-            Some("B2:C3".to_string())
-        );
+        assert_eq!(super::shift_range("A1:B2", 1, 1), Some("B2:C3".to_string()));
 
         assert_eq!(super::shift_a1("A1", -1, 0), None);
         assert_eq!(super::shift_range("A1:B2", -1, 0), None);
+
+        #[cfg(feature = "python")]
+        {
+            assert_eq!(
+                super::column_from_key(super::ColumnKey::Letters("AA")),
+                Some(27)
+            );
+            assert_eq!(super::column_from_key(super::ColumnKey::Index(3)), Some(3));
+        }
     }
 }

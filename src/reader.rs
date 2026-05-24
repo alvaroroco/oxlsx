@@ -220,7 +220,9 @@ impl Worksheet {
     }
 
     pub fn append(&mut self, row: Row) {
-        let target_row = self.used_bounds().map_or(1, |(_, _, _, max_row)| max_row + 1);
+        let target_row = self
+            .used_bounds()
+            .map_or(1, |(_, _, _, max_row)| max_row + 1);
 
         match row {
             Row::Ordered(values) => {
@@ -466,8 +468,6 @@ impl Worksheet {
                 if let Some(new_range) = shift_range(&range, -(amount as i32), 0) {
                     shifted.push(new_range);
                 }
-            } else if start_row >= idx && end_row <= delete_end {
-                continue;
             } else {
                 continue;
             }
@@ -506,8 +506,6 @@ impl Worksheet {
                 if let Some(new_range) = shift_range(&range, 0, -(amount as i32)) {
                     shifted.push(new_range);
                 }
-            } else if start_col >= idx && end_col <= delete_end {
-                continue;
             } else {
                 continue;
             }

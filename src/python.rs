@@ -1,11 +1,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::useless_conversion)]
 
-use crate::coords::rc_to_a1;
-use crate::{Cell, Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook};
+use crate::coords::{ColumnKey, column_from_key, rc_to_a1};
+use crate::{Cell, Color, Fill, Font, OxlsxError, Row, StyleSheet, Value, Workbook};
 use chrono::Datelike;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDate, PyDateAccess, PyDict, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[pymodule]
@@ -306,6 +306,73 @@ impl PyWorksheet {
         sheet.row_height(row, height);
         Ok(())
     }
+
+    fn append(&self, values: &Bound<'_, PyAny>) -> PyResult<()> {
+        let row = py_to_row(values)?;
+
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.append(row);
+        Ok(())
+    }
+
+    #[pyo3(signature = (idx, amount=1))]
+    fn insert_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.insert_rows(idx, amount);
+        Ok(())
+    }
+
+    #[pyo3(signature = (idx, amount=1))]
+    fn delete_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.delete_rows(idx, amount);
+        Ok(())
+    }
+
+    #[pyo3(signature = (idx, amount=1))]
+    fn insert_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.insert_cols(idx, amount);
+        Ok(())
+    }
+
+    #[pyo3(signature = (idx, amount=1))]
+    fn delete_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.delete_cols(idx, amount);
+        Ok(())
+    }
+
+    #[pyo3(signature = (cell_range, rows=0, cols=0, translate=false))]
+    fn move_range(&self, cell_range: &str, rows: i32, cols: i32, translate: bool) -> PyResult<()> {
+        if translate {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "translate=True is not implemented in this phase",
+            ));
+        }
+
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.move_range(cell_range, rows, cols);
+        Ok(())
+    }
 }
 
 #[pyclass(name = "Cell")]
@@ -490,6 +557,40 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     Err(pyo3::exceptions::PyTypeError::new_err(
         "Unsupported Python value type for oxlsx.Value",
     ))
+}
+
+fn py_to_row(obj: &Bound<'_, PyAny>) -> PyResult<Row> {
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let mut sparse = Vec::with_capacity(dict.len());
+        for (key, value) in dict.iter() {
+            let col = if let Ok(letters) = key.extract::<String>() {
+                column_from_key(ColumnKey::Letters(letters.as_str())).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("Invalid dict column key")
+                })?
+            } else if let Ok(index) = key.extract::<u32>() {
+                column_from_key(ColumnKey::Index(index)).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("Column index must be 1-based")
+                })?
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "append(dict) keys must be letters or 1-based integers",
+                ));
+            };
+
+            sparse.push((col, py_to_value(&value)?));
+        }
+
+        return Ok(Row::Sparse(sparse));
+    }
+
+    let iterator = obj.iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("append() requires an iterable or dict")
+    })?;
+    let mut ordered = Vec::new();
+    for item in iterator {
+        ordered.push(py_to_value(&item?)?);
+    }
+    Ok(Row::Ordered(ordered))
 }
 
 fn map_oxlsx_error(err: OxlsxError) -> PyErr {
