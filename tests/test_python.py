@@ -177,3 +177,45 @@ def test_ws_setitem(new_wb):
     ws = wb.active
     ws["A1"] = "world"
     assert ws["A1"].value == "world"
+
+
+def test_rmw_modify_cell(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    wb.active["A1"] = "RMW"
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        wb.save(path)
+        wb2 = load_wb(path)
+        assert wb2.active["A1"].value == "RMW"
+    finally:
+        os.unlink(path)
+
+
+def test_rmw_preserves_other_sheets(load_wb):
+    wb = load_wb("samples/multi_sheet.xlsx")
+    wb["Empleados"]["A1"] = "RMW"
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        wb.save(path)
+        wb2 = load_wb(path)
+        assert wb2["Productos"]["A1"].value == "Laptop"
+    finally:
+        os.unlink(path)
+
+
+def test_rmw_preserves_font(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    wb.active["C1"] = 99
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        wb.save(path)
+        wb2 = load_wb(path)
+        assert wb2.active["A1"].font.bold is True
+    finally:
+        os.unlink(path)
