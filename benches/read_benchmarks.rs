@@ -84,6 +84,32 @@ fn bench_style_resolution(c: &mut Criterion) {
     });
 }
 
+/// Benchmark: readonly metadata open only (no rows iteration).
+fn bench_readonly_metadata(c: &mut Criterion) {
+    c.bench_function("bench_readonly_metadata", |b| {
+        b.iter(|| {
+            let wb = Workbook::open_readonly(black_box("samples/test.xlsx")).unwrap();
+            black_box(wb.sheetnames());
+            black_box(wb.active().map(|ws| ws.title().to_string()));
+        });
+    });
+}
+
+/// Benchmark: readonly open + iterate all rows/cells from test fixture.
+fn bench_readonly_rows(c: &mut Criterion) {
+    c.bench_function("bench_readonly_rows", |b| {
+        b.iter(|| {
+            let wb = Workbook::open_readonly(black_box("samples/test.xlsx")).unwrap();
+            let ws = wb.sheet(0).unwrap();
+            for row in ws.rows() {
+                for cell in row {
+                    black_box(cell.value());
+                }
+            }
+        });
+    });
+}
+
 criterion_group!(
     read_benches,
     bench_open_test_xlsx,
@@ -91,5 +117,7 @@ criterion_group!(
     bench_open_10k_rows,
     bench_open_10k_metadata_only,
     bench_style_resolution,
+    bench_readonly_metadata,
+    bench_readonly_rows,
 );
 criterion_main!(read_benches);

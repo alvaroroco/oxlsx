@@ -1,5 +1,5 @@
 use crate::workbook_rels::parse_sheet_refs;
-use crate::{Fill, Font, OxlsxError, SharedStrings, StyleId, StyleSheet};
+use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -92,6 +92,26 @@ impl Cell {
             Value::String(s) => Some(s.as_str()),
             _ => None,
         }
+    }
+
+    pub(crate) fn parsed(
+        reference: String,
+        value: Value,
+        style_id: StyleId,
+        styles: Arc<StyleSheet>,
+    ) -> Self {
+        Self {
+            reference,
+            value,
+            style_id,
+            styles,
+            write_font: None,
+            write_fill: None,
+        }
+    }
+
+    pub(crate) fn empty(reference: String, styles: Arc<StyleSheet>) -> Self {
+        Self::parsed(reference, Value::Empty, StyleId::default(), styles)
     }
 }
 
@@ -245,6 +265,10 @@ impl Workbook {
         })
     }
 
+    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<ReadonlyWorkbook, OxlsxError> {
+        crate::readonly::open_readonly(path)
+    }
+
     pub fn worksheets(&self) -> &[Worksheet] {
         &self.sheets
     }
@@ -296,109 +320,45 @@ fn parse_sheet<R: BufRead>(
     xml.config_mut().trim_text(true);
 
     let mut buf = Vec::new();
-    let mut text = String::new();
-    let mut inline_text = String::new();
-    let mut in_value = false;
-    let mut in_inline_str = false;
-    let mut in_is_t = false;
-    let mut current: Option<CellBuilder> = None;
+    let mut decoder = CellDecoder::new(shared_strings);
     let mut cells: HashMap<String, Cell> = HashMap::new();
 
     loop {
         match xml.read_event_into(&mut buf)? {
             Event::Start(e) if e.local_name().as_ref() == b"c" => {
-                let reference = attr_value(&e, b"r")?.unwrap_or_default();
-                let style_id = attr_value(&e, b"s")?
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .map(StyleId)
-                    .unwrap_or_default();
-                let cell_type = attr_value(&e, b"t")?.unwrap_or_else(|| "n".to_string());
-                let is_inline_str = cell_type == "inlineStr";
-
-                current = Some(CellBuilder {
-                    reference,
-                    style_id,
-                    cell_type,
-                    value: Value::Empty,
-                });
-                in_inline_str = is_inline_str;
-                in_is_t = false;
+                decoder.start_cell(&e)?;
             }
             Event::Start(e) if e.local_name().as_ref() == b"v" => {
-                in_value = true;
-                text.clear();
+                decoder.start_value();
             }
-            Event::Start(e) if in_inline_str && e.local_name().as_ref() == b"is" => {
-                inline_text.clear();
+            Event::Start(e) if decoder.in_inline_str() && e.local_name().as_ref() == b"is" => {
+                decoder.start_inline_str();
             }
-            Event::Start(e) if in_inline_str && e.local_name().as_ref() == b"t" => {
-                in_is_t = true;
+            Event::Start(e) if decoder.in_inline_str() && e.local_name().as_ref() == b"t" => {
+                decoder.start_inline_text();
             }
-            Event::Empty(e) if in_inline_str && e.local_name().as_ref() == b"t" => {
-                in_is_t = false;
+            Event::Empty(e) if decoder.in_inline_str() && e.local_name().as_ref() == b"t" => {
+                decoder.end_inline_text();
             }
-            Event::Text(t) if in_value => {
-                text.push_str(&t.unescape()?);
+            Event::Text(t) if decoder.in_value() => {
+                decoder.push_value_text(&t.unescape()?);
             }
-            Event::Text(t) if in_is_t => {
-                inline_text.push_str(&t.unescape()?);
+            Event::Text(t) if decoder.in_inline_text() => {
+                decoder.push_inline_text(&t.unescape()?);
             }
             Event::End(e) if e.local_name().as_ref() == b"v" => {
-                in_value = false;
-                if let Some(builder) = current.as_mut() {
-                    let mut value = match builder.cell_type.as_str() {
-                        "s" => text
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|i| shared_strings.get(i))
-                            .map(|s| Value::String(s.to_string()))
-                            .unwrap_or(Value::Empty),
-                        "b" => Value::Bool(text == "1"),
-                        _ => text
-                            .parse::<f64>()
-                            .map(Value::Number)
-                            .unwrap_or(Value::Empty),
-                    };
-
-                    if let Value::Number(n) = value
-                        && styles.is_date_format(builder.style_id)
-                    {
-                        value = excel_serial_to_date(n)
-                            .map(Value::Date)
-                            .unwrap_or(Value::Number(n));
-                    }
-
-                    builder.value = value;
-                }
+                decoder.end_value(&styles);
             }
             Event::End(e) if e.local_name().as_ref() == b"t" => {
-                in_is_t = false;
+                decoder.end_inline_text();
             }
             Event::End(e) if e.local_name().as_ref() == b"is" => {
-                if let Some(builder) = current.as_mut() {
-                    builder.value = Value::String(mem::take(&mut inline_text));
-                }
+                decoder.end_inline_str();
             }
             Event::End(e) if e.local_name().as_ref() == b"c" => {
-                if let Some(builder) = current.take()
-                    && !builder.reference.is_empty()
-                {
-                    let reference = builder.reference.clone();
-                    cells.insert(
-                        reference,
-                        Cell {
-                            reference: builder.reference,
-                            value: builder.value,
-                            style_id: builder.style_id,
-                            styles: styles.clone(),
-                            write_font: None,
-                            write_fill: None,
-                        },
-                    );
+                if let Some(cell) = decoder.finish_cell(styles.clone()) {
+                    cells.insert(cell.reference().to_string(), cell);
                 }
-
-                in_inline_str = false;
-                in_is_t = false;
             }
             Event::Eof => break,
             _ => {}
@@ -413,12 +373,169 @@ fn parse_sheet<R: BufRead>(
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CellBuilder {
     reference: String,
     style_id: StyleId,
     cell_type: String,
     value: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CellDecoder {
+    shared_strings: Arc<Vec<String>>,
+    value_text: String,
+    inline_text: String,
+    in_value: bool,
+    in_inline_str: bool,
+    in_inline_text: bool,
+    current: Option<CellBuilder>,
+}
+
+impl CellDecoder {
+    pub(crate) fn new(shared_strings: &[String]) -> Self {
+        Self {
+            shared_strings: Arc::new(shared_strings.to_vec()),
+            value_text: String::new(),
+            inline_text: String::new(),
+            in_value: false,
+            in_inline_str: false,
+            in_inline_text: false,
+            current: None,
+        }
+    }
+
+    pub(crate) fn new_arc(shared_strings: Arc<Vec<String>>) -> Self {
+        Self {
+            shared_strings,
+            value_text: String::new(),
+            inline_text: String::new(),
+            in_value: false,
+            in_inline_str: false,
+            in_inline_text: false,
+            current: None,
+        }
+    }
+
+    pub(crate) fn start_cell(&mut self, cell_start: &BytesStart<'_>) -> Result<(), OxlsxError> {
+        let reference = attr_value(cell_start, b"r")?.unwrap_or_default();
+        let style_id = attr_value(cell_start, b"s")?
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(StyleId)
+            .unwrap_or_default();
+        let cell_type = attr_value(cell_start, b"t")?.unwrap_or_else(|| "n".to_string());
+
+        self.current = Some(CellBuilder {
+            reference,
+            style_id,
+            cell_type: cell_type.clone(),
+            value: Value::Empty,
+        });
+        self.in_inline_str = cell_type == "inlineStr";
+        self.in_inline_text = false;
+
+        Ok(())
+    }
+
+    pub(crate) fn start_value(&mut self) {
+        self.in_value = true;
+        self.value_text.clear();
+    }
+
+    pub(crate) fn push_value_text(&mut self, text: &str) {
+        if self.in_value {
+            self.value_text.push_str(text);
+        }
+    }
+
+    pub(crate) fn end_value(&mut self, styles: &StyleSheet) {
+        self.in_value = false;
+
+        if let Some(builder) = self.current.as_mut() {
+            let mut value = match builder.cell_type.as_str() {
+                "s" => self
+                    .value_text
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| self.shared_strings.get(i))
+                    .map(|s| Value::String(s.to_string()))
+                    .unwrap_or(Value::Empty),
+                "b" => Value::Bool(self.value_text == "1"),
+                _ => self
+                    .value_text
+                    .parse::<f64>()
+                    .map(Value::Number)
+                    .unwrap_or(Value::Empty),
+            };
+
+            if let Value::Number(n) = value
+                && styles.is_date_format(builder.style_id)
+            {
+                value = excel_serial_to_date(n)
+                    .map(Value::Date)
+                    .unwrap_or(Value::Number(n));
+            }
+
+            builder.value = value;
+        }
+    }
+
+    pub(crate) fn start_inline_str(&mut self) {
+        if self.in_inline_str {
+            self.inline_text.clear();
+        }
+    }
+
+    pub(crate) fn start_inline_text(&mut self) {
+        if self.in_inline_str {
+            self.in_inline_text = true;
+        }
+    }
+
+    pub(crate) fn push_inline_text(&mut self, text: &str) {
+        if self.in_inline_text {
+            self.inline_text.push_str(text);
+        }
+    }
+
+    pub(crate) fn end_inline_text(&mut self) {
+        self.in_inline_text = false;
+    }
+
+    pub(crate) fn end_inline_str(&mut self) {
+        if let Some(builder) = self.current.as_mut() {
+            builder.value = Value::String(mem::take(&mut self.inline_text));
+        }
+    }
+
+    pub(crate) fn finish_cell(&mut self, styles: Arc<StyleSheet>) -> Option<Cell> {
+        self.in_inline_str = false;
+        self.in_inline_text = false;
+
+        let builder = self.current.take()?;
+        if builder.reference.is_empty() {
+            return None;
+        }
+
+        Some(Cell::parsed(
+            builder.reference,
+            builder.value,
+            builder.style_id,
+            styles,
+        ))
+    }
+
+    pub(crate) fn in_value(&self) -> bool {
+        self.in_value
+    }
+
+    pub(crate) fn in_inline_str(&self) -> bool {
+        self.in_inline_str
+    }
+
+    pub(crate) fn in_inline_text(&self) -> bool {
+        self.in_inline_text
+    }
 }
 
 fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxError> {
@@ -440,9 +557,10 @@ fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, Workbook, Worksheet, parse_sheet};
+    use super::{CellDecoder, Value, Workbook, Worksheet, parse_sheet};
     use crate::{Fill, Font, OxlsxError, StyleId, StyleSheet};
     use chrono::NaiveDate;
+    use quick_xml::events::BytesStart;
     use std::collections::HashMap;
     use std::fs;
     use std::io::Cursor;
@@ -840,5 +958,27 @@ mod tests {
         assert_eq!(wb.worksheets().len(), 2);
         assert_eq!(wb.sheetnames(), vec!["Empleados", "Productos"]);
         assert_eq!(wb.active().unwrap().title(), "Empleados");
+    }
+
+    #[test]
+    fn cell_decoder_decodes_shared_string_cells() {
+        let shared_strings = ["Hola".to_string()];
+        let styles = Arc::new(StyleSheet::default());
+        let mut decoder = CellDecoder::new(&shared_strings);
+
+        let mut cell_start = BytesStart::new("c");
+        cell_start.push_attribute(("r", "A1"));
+        cell_start.push_attribute(("s", "0"));
+        cell_start.push_attribute(("t", "s"));
+
+        decoder.start_cell(&cell_start).unwrap();
+        decoder.start_value();
+        decoder.push_value_text("0");
+        decoder.end_value(&styles);
+
+        let cell = decoder.finish_cell(styles).expect("cell should be decoded");
+        assert_eq!(cell.reference(), "A1");
+        assert_eq!(cell.style_id(), StyleId(0));
+        assert_eq!(cell.value(), &Value::String("Hola".to_string()));
     }
 }
