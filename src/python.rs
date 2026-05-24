@@ -1,10 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::useless_conversion)]
 
-use crate::{Cell, Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook};
+use crate::{
+    Alignment, Border, Cell, Color, Fill, Font, OxlsxError, Protection, Side, StyleSheet, Value,
+    Workbook,
+};
 use chrono::Datelike;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule};
+use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[pymodule]
@@ -16,6 +19,10 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFont>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyColor>()?;
+    m.add_class::<PyAlignment>()?;
+    m.add_class::<PySide>()?;
+    m.add_class::<PyBorder>()?;
+    m.add_class::<PyProtection>()?;
 
     Ok(())
 }
@@ -212,6 +219,135 @@ impl PyWorksheet {
         sheet.row_height(row, height);
         Ok(())
     }
+
+    #[getter]
+    fn max_row(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.max_row())
+    }
+
+    #[getter]
+    fn max_column(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.max_column())
+    }
+
+    #[getter]
+    fn min_row(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.min_row())
+    }
+
+    #[getter]
+    fn min_column(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.min_column())
+    }
+
+    #[pyo3(signature = (min_row=None, max_row=None, min_col=None, max_col=None, values_only=false))]
+    fn iter_rows(
+        &self,
+        py: Python<'_>,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<Vec<Py<PyTuple>>> {
+        let rows = {
+            let workbook = self.lock()?;
+            let sheet = workbook
+                .sheet(self.sheet_index)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+            sheet.iter_rows(min_row, max_row, min_col, max_col)
+        };
+
+        rows_to_py_tuples(py, rows, values_only)
+    }
+
+    #[pyo3(signature = (min_col=None, max_col=None, min_row=None, max_row=None, values_only=false))]
+    fn iter_cols(
+        &self,
+        py: Python<'_>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<Vec<Py<PyTuple>>> {
+        let cols = {
+            let workbook = self.lock()?;
+            let sheet = workbook
+                .sheet(self.sheet_index)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+            sheet.iter_cols(min_row, max_row, min_col, max_col)
+        };
+
+        rows_to_py_tuples(py, cols, values_only)
+    }
+
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_rows(py, None, None, None, None, false)
+    }
+
+    #[getter]
+    fn columns(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_cols(py, None, None, None, None, false)
+    }
+
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_rows(py, None, None, None, None, true)
+    }
+
+    fn set_cell_number_format(&self, coord: &str, number_format: &str) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_number_format(coord, number_format);
+        Ok(())
+    }
+
+    fn set_cell_alignment(&self, coord: &str, alignment: &PyAlignment) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_alignment(coord, alignment.inner.clone());
+        Ok(())
+    }
+
+    fn set_cell_border(&self, coord: &str, border: &PyBorder) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_border(coord, border.inner.clone());
+        Ok(())
+    }
+
+    fn set_cell_protection(&self, coord: &str, protection: &PyProtection) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_protection(coord, protection.inner.clone());
+        Ok(())
+    }
 }
 
 #[pyclass(name = "Cell")]
@@ -242,6 +378,38 @@ impl PyCell {
             .cloned()
             .or_else(|| self.inner.write_fill.clone())
             .map(|inner| PyFill { inner })
+    }
+
+    #[getter]
+    fn number_format(&self) -> String {
+        self.inner.number_format().to_string()
+    }
+
+    #[getter]
+    fn alignment(&self) -> Option<PyAlignment> {
+        self.inner
+            .alignment()
+            .cloned()
+            .or_else(|| self.inner.write_alignment.clone())
+            .map(|inner| PyAlignment { inner })
+    }
+
+    #[getter]
+    fn border(&self) -> Option<PyBorder> {
+        self.inner
+            .border()
+            .cloned()
+            .or_else(|| self.inner.write_border.clone())
+            .map(|inner| PyBorder { inner })
+    }
+
+    #[getter]
+    fn protection(&self) -> Option<PyProtection> {
+        self.inner
+            .protection()
+            .cloned()
+            .or_else(|| self.inner.write_protection.clone())
+            .map(|inner| PyProtection { inner })
     }
 }
 
@@ -277,12 +445,31 @@ impl PyFill {
 }
 
 #[pyclass(name = "Color")]
+#[derive(Clone)]
 struct PyColor {
     inner: Color,
 }
 
 #[pymethods]
 impl PyColor {
+    #[new]
+    #[pyo3(signature = (rgb=None, theme=None, indexed=None))]
+    fn new(rgb: Option<String>, theme: Option<u32>, indexed: Option<u32>) -> PyResult<Self> {
+        let inner = if let Some(rgb) = rgb {
+            Color::Argb(rgb)
+        } else if let Some(theme) = theme {
+            Color::Theme(theme)
+        } else if let Some(indexed) = indexed {
+            Color::Indexed(indexed)
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Color requires rgb, theme, or indexed",
+            ));
+        };
+
+        Ok(Self { inner })
+    }
+
     #[getter]
     fn rgb(&self) -> Option<String> {
         match &self.inner {
@@ -308,6 +495,171 @@ impl PyColor {
     }
 }
 
+#[pyclass(name = "Alignment")]
+struct PyAlignment {
+    inner: Alignment,
+}
+
+#[pymethods]
+impl PyAlignment {
+    #[new]
+    #[pyo3(signature = (horizontal=None, vertical=None, wrap_text=false, indent=0))]
+    fn new(
+        horizontal: Option<String>,
+        vertical: Option<String>,
+        wrap_text: bool,
+        indent: u32,
+    ) -> Self {
+        Self {
+            inner: Alignment {
+                horizontal,
+                vertical,
+                wrap_text,
+                indent,
+            },
+        }
+    }
+
+    #[getter]
+    fn horizontal(&self) -> Option<String> {
+        self.inner.horizontal.clone()
+    }
+
+    #[getter]
+    fn vertical(&self) -> Option<String> {
+        self.inner.vertical.clone()
+    }
+
+    #[getter]
+    fn wrap_text(&self) -> bool {
+        self.inner.wrap_text
+    }
+
+    #[getter]
+    fn indent(&self) -> u32 {
+        self.inner.indent
+    }
+}
+
+#[pyclass(name = "Side")]
+#[derive(Clone)]
+struct PySide {
+    inner: Side,
+}
+
+#[pymethods]
+impl PySide {
+    #[new]
+    #[pyo3(signature = (style=None, color=None))]
+    fn new(style: Option<String>, color: Option<PyColor>) -> Self {
+        Self {
+            inner: Side {
+                style,
+                color: color.map(|py_color| py_color.inner),
+            },
+        }
+    }
+
+    #[getter]
+    fn style(&self) -> Option<String> {
+        self.inner.style.clone()
+    }
+
+    #[getter]
+    fn color(&self) -> Option<PyColor> {
+        self.inner.color.clone().map(|inner| PyColor { inner })
+    }
+}
+
+#[pyclass(name = "Border")]
+struct PyBorder {
+    inner: Border,
+}
+
+#[pymethods]
+impl PyBorder {
+    #[new]
+    #[pyo3(signature = (left=None, right=None, top=None, bottom=None, diagonal=None))]
+    fn new(
+        left: Option<PySide>,
+        right: Option<PySide>,
+        top: Option<PySide>,
+        bottom: Option<PySide>,
+        diagonal: Option<PySide>,
+    ) -> Self {
+        Self {
+            inner: Border {
+                left: left.map_or_else(Side::default, |side| side.inner),
+                right: right.map_or_else(Side::default, |side| side.inner),
+                top: top.map_or_else(Side::default, |side| side.inner),
+                bottom: bottom.map_or_else(Side::default, |side| side.inner),
+                diagonal: diagonal.map_or_else(Side::default, |side| side.inner),
+            },
+        }
+    }
+
+    #[getter]
+    fn left(&self) -> PySide {
+        PySide {
+            inner: self.inner.left.clone(),
+        }
+    }
+
+    #[getter]
+    fn right(&self) -> PySide {
+        PySide {
+            inner: self.inner.right.clone(),
+        }
+    }
+
+    #[getter]
+    fn top(&self) -> PySide {
+        PySide {
+            inner: self.inner.top.clone(),
+        }
+    }
+
+    #[getter]
+    fn bottom(&self) -> PySide {
+        PySide {
+            inner: self.inner.bottom.clone(),
+        }
+    }
+
+    #[getter]
+    fn diagonal(&self) -> PySide {
+        PySide {
+            inner: self.inner.diagonal.clone(),
+        }
+    }
+}
+
+#[pyclass(name = "Protection")]
+struct PyProtection {
+    inner: Protection,
+}
+
+#[pymethods]
+impl PyProtection {
+    #[new]
+    #[pyo3(signature = (locked=true, hidden=false))]
+    fn new(locked: bool, hidden: bool) -> Self {
+        Self {
+            inner: Protection { locked, hidden },
+        }
+    }
+
+    #[getter]
+    fn locked(&self) -> bool {
+        self.inner.locked
+    }
+
+    #[getter]
+    fn hidden(&self) -> bool {
+        self.inner.hidden
+    }
+}
+
 fn rc_to_a1(row: usize, col: usize) -> String {
     assert!(row >= 1, "row must be 1-based");
     assert!(col >= 1, "col must be 1-based");
@@ -322,6 +674,32 @@ fn rc_to_a1(row: usize, col: usize) -> String {
     }
 
     format!("{letters}{row}")
+}
+
+fn rows_to_py_tuples(
+    py: Python<'_>,
+    rows: Vec<Vec<Cell>>,
+    values_only: bool,
+) -> PyResult<Vec<Py<PyTuple>>> {
+    let mut tuples = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let mut items: Vec<PyObject> = Vec::with_capacity(row.len());
+        if values_only {
+            for cell in row {
+                items.push(value_to_py(cell.value(), py));
+            }
+        } else {
+            for cell in row {
+                let py_cell = Py::new(py, PyCell { inner: cell })?;
+                items.push(py_cell.into_py(py));
+            }
+        }
+        let tuple = PyTuple::new_bound(py, items).unbind();
+        tuples.push(tuple);
+    }
+
+    Ok(tuples)
 }
 
 fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {

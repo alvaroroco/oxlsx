@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
+use oxlsx::{Alignment, Border, Color, Fill, Font, Protection, Side, StyleId, Value, Workbook};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -515,6 +515,147 @@ fn write_shared_strings_index() {
     assert!(sheet_xml.contains("t=\"s\""));
     assert!(sheet_xml.contains("<v>0</v>"));
     assert!(sheet_xml.contains("<v>1</v>"));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn cell_number_format_round_trip() {
+    let path = temp_path("oxlsx_rt_number_format.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    wb.active_mut()
+        .unwrap()
+        .set_cell_number_format("C1", "#,##0.00");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.active().unwrap().cell("C1").unwrap().number_format(),
+        "#,##0.00"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn cell_alignment_round_trip() {
+    let path = temp_path("oxlsx_rt_alignment.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Hola");
+    ws.set_cell_alignment(
+        "A1",
+        Alignment {
+            horizontal: Some("center".to_string()),
+            vertical: Some("top".to_string()),
+            wrap_text: true,
+            indent: 2,
+        },
+    );
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let alignment = wb2
+        .active()
+        .unwrap()
+        .cell("A1")
+        .unwrap()
+        .alignment()
+        .unwrap();
+    assert_eq!(alignment.horizontal.as_deref(), Some("center"));
+    assert_eq!(alignment.vertical.as_deref(), Some("top"));
+    assert!(alignment.wrap_text);
+    assert_eq!(alignment.indent, 2);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn cell_border_round_trip() {
+    let path = temp_path("oxlsx_rt_border.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Hola");
+    ws.set_cell_border(
+        "A1",
+        Border {
+            left: Side {
+                style: Some("thin".to_string()),
+                color: Some(Color::Theme(3)),
+            },
+            right: Side {
+                style: Some("double".to_string()),
+                color: Some(Color::Argb("FFFF0000".to_string())),
+            },
+            top: Side::default(),
+            bottom: Side {
+                style: Some("dashed".to_string()),
+                color: Some(Color::Indexed(6)),
+            },
+            diagonal: Side::default(),
+        },
+    );
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let border = wb2.active().unwrap().cell("A1").unwrap().border().unwrap();
+    assert_eq!(border.left.style.as_deref(), Some("thin"));
+    assert_eq!(border.left.color, Some(Color::Theme(3)));
+    assert_eq!(border.right.style.as_deref(), Some("double"));
+    assert_eq!(
+        border.right.color,
+        Some(Color::Argb("FFFF0000".to_string()))
+    );
+    assert_eq!(border.bottom.style.as_deref(), Some("dashed"));
+    assert_eq!(border.bottom.color, Some(Color::Indexed(6)));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn cell_protection_round_trip() {
+    let path = temp_path("oxlsx_rt_protection.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Hola");
+    ws.set_cell_protection(
+        "A1",
+        Protection {
+            locked: false,
+            hidden: true,
+        },
+    );
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let protection = wb2
+        .active()
+        .unwrap()
+        .cell("A1")
+        .unwrap()
+        .protection()
+        .unwrap();
+    assert!(!protection.locked);
+    assert!(protection.hidden);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn style_round_trip_preserves_existing_ids() {
+    let path = temp_path("oxlsx_rt_style_id_stability.xlsx");
+    let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+    let original_style_id = wb.active().unwrap().cell("A1").unwrap().style_id();
+    wb.active_mut()
+        .unwrap()
+        .set_cell_number_format("C1", "0.000");
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.active().unwrap().cell("A1").unwrap().style_id(),
+        original_style_id
+    );
 
     fs::remove_file(path).ok();
 }

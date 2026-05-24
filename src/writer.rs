@@ -99,11 +99,24 @@ pub(crate) fn collect_styles(
 
     for (sheet_idx, sheet) in sheets.iter().enumerate() {
         for (reference, cell) in sheet.cells() {
-            if preserve_original && cell.write_font.is_none() && cell.write_fill.is_none() {
+            if preserve_original
+                && cell.write_font.is_none()
+                && cell.write_fill.is_none()
+                && cell.write_number_format.is_none()
+                && cell.write_alignment.is_none()
+                && cell.write_border.is_none()
+                && cell.write_protection.is_none()
+            {
                 continue;
             }
 
-            if cell.write_font.is_none() && cell.write_fill.is_none() {
+            if cell.write_font.is_none()
+                && cell.write_fill.is_none()
+                && cell.write_number_format.is_none()
+                && cell.write_alignment.is_none()
+                && cell.write_border.is_none()
+                && cell.write_protection.is_none()
+            {
                 continue;
             }
 
@@ -142,22 +155,40 @@ pub(crate) fn collect_styles(
 
             let font_idx = find_or_push(&mut fonts, font) as u32;
             let fill_idx = find_or_push(&mut fills, fill) as u32;
-            let border_idx = base_xf.border_id.min((borders.len().saturating_sub(1)) as u32);
+            let border = match &cell.write_border {
+                Some(border) => border.clone(),
+                None => borders
+                    .get(base_xf.border_id as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let border_idx = find_or_push(&mut borders, border) as u32;
+            let num_fmt_id = match &cell.write_number_format {
+                Some(number_format) => ensure_num_fmt_id(number_format, &mut num_fmts),
+                None => base_xf.num_fmt_id,
+            };
             let style_id = find_or_push(
                 &mut cell_xfs,
                 CellXf {
                     font_id: font_idx,
                     fill_id: fill_idx,
-                    num_fmt_id: base_xf.num_fmt_id,
+                    num_fmt_id,
                     border_id: border_idx,
-                    alignment: base_xf.alignment.clone(),
-                    protection: base_xf.protection.clone(),
+                    alignment: cell
+                        .write_alignment
+                        .clone()
+                        .or_else(|| base_xf.alignment.clone()),
+                    protection: cell
+                        .write_protection
+                        .clone()
+                        .or_else(|| base_xf.protection.clone()),
                     apply_font: base_xf.apply_font || cell.write_font.is_some(),
                     apply_fill: base_xf.apply_fill || cell.write_fill.is_some(),
-                    apply_border: base_xf.apply_border,
-                    apply_number_format: base_xf.apply_number_format,
-                    apply_alignment: base_xf.apply_alignment,
-                    apply_protection: base_xf.apply_protection,
+                    apply_border: base_xf.apply_border || cell.write_border.is_some(),
+                    apply_number_format: base_xf.apply_number_format
+                        || cell.write_number_format.is_some(),
+                    apply_alignment: base_xf.apply_alignment || cell.write_alignment.is_some(),
+                    apply_protection: base_xf.apply_protection || cell.write_protection.is_some(),
                 },
             ) as u32;
 
@@ -258,6 +289,47 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
 
 fn is_builtin_date_num_fmt(num_fmt_id: u32) -> bool {
     (14..=17).contains(&num_fmt_id) || num_fmt_id == 22
+}
+
+fn ensure_num_fmt_id(number_format: &str, num_fmts: &mut Vec<(u32, String)>) -> u32 {
+    if let Some((id, _)) = num_fmts
+        .iter()
+        .find(|(_, format_code)| format_code == number_format)
+    {
+        return *id;
+    }
+
+    if let Some(id) = builtin_num_fmt_id(number_format) {
+        return id;
+    }
+
+    let mut next_id = num_fmts.iter().map(|(id, _)| *id).max().unwrap_or(163) + 1;
+    if next_id < 164 {
+        next_id = 164;
+    }
+    while num_fmts.iter().any(|(id, _)| *id == next_id) {
+        next_id += 1;
+    }
+
+    num_fmts.push((next_id, number_format.to_string()));
+    next_id
+}
+
+fn builtin_num_fmt_id(number_format: &str) -> Option<u32> {
+    match number_format {
+        "General" => Some(0),
+        "0" => Some(1),
+        "0.00" => Some(2),
+        "#,##0" => Some(3),
+        "#,##0.00" => Some(4),
+        "mm-dd-yy" => Some(14),
+        "d-mmm-yy" => Some(15),
+        "d-mmm" => Some(16),
+        "mmm-yy" => Some(17),
+        "m/d/yy h:mm" => Some(22),
+        "@" => Some(49),
+        _ => None,
+    }
 }
 
 pub fn write_xlsx(

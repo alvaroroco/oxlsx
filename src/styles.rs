@@ -86,23 +86,12 @@ impl Default for Font {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Alignment {
     pub horizontal: Option<String>,
     pub vertical: Option<String>,
     pub wrap_text: bool,
     pub indent: u32,
-}
-
-impl Default for Alignment {
-    fn default() -> Self {
-        Self {
-            horizontal: None,
-            vertical: None,
-            wrap_text: false,
-            indent: 0,
-        }
-    }
 }
 
 impl Alignment {
@@ -450,7 +439,8 @@ impl StyleSheet {
                     }
                     b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_border => {
                         in_side = true;
-                        cur_side_name = Some(String::from_utf8_lossy(e.local_name().as_ref()).to_string());
+                        cur_side_name =
+                            Some(String::from_utf8_lossy(e.local_name().as_ref()).to_string());
                         cur_side = Side {
                             style: attr_value(&e, b"style")?,
                             color: None,
@@ -587,7 +577,11 @@ impl StyleSheet {
                     }
                     b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_side => {
                         if let Some(name) = cur_side_name.take() {
-                            assign_side(&mut cur_border, name.as_bytes(), std::mem::take(&mut cur_side));
+                            assign_side(
+                                &mut cur_border,
+                                name.as_bytes(),
+                                std::mem::take(&mut cur_side),
+                            );
                         }
                         in_side = false;
                     }
@@ -900,7 +894,8 @@ mod tests {
         };
 
         let attrs = xf.to_xml_attributes();
-        let reparsed = CellXf::from_xml_attributes(&attrs, xf.alignment.clone(), xf.protection.clone());
+        let reparsed =
+            CellXf::from_xml_attributes(&attrs, xf.alignment.clone(), xf.protection.clone());
         assert_eq!(reparsed, xf);
     }
 

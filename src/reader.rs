@@ -1,5 +1,8 @@
 use crate::workbook_rels::parse_sheet_refs;
-use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
+use crate::{
+    Alignment, Border, Fill, Font, OxlsxError, Protection, ReadonlyWorkbook, SharedStrings,
+    StyleId, StyleSheet,
+};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -65,6 +68,10 @@ pub struct Cell {
     styles: Arc<StyleSheet>,
     pub(crate) write_font: Option<Font>,
     pub(crate) write_fill: Option<Fill>,
+    pub(crate) write_number_format: Option<String>,
+    pub(crate) write_alignment: Option<Alignment>,
+    pub(crate) write_border: Option<Border>,
+    pub(crate) write_protection: Option<Protection>,
 }
 
 impl Cell {
@@ -88,6 +95,31 @@ impl Cell {
         self.styles.fill(self.style_id)
     }
 
+    pub fn number_format(&self) -> &str {
+        self.write_number_format
+            .as_deref()
+            .or_else(|| self.styles.number_format(self.style_id))
+            .unwrap_or("General")
+    }
+
+    pub fn alignment(&self) -> Option<&Alignment> {
+        self.write_alignment
+            .as_ref()
+            .or_else(|| self.styles.alignment(self.style_id))
+    }
+
+    pub fn border(&self) -> Option<&Border> {
+        self.write_border
+            .as_ref()
+            .or_else(|| self.styles.border(self.style_id))
+    }
+
+    pub fn protection(&self) -> Option<&Protection> {
+        self.write_protection
+            .as_ref()
+            .or_else(|| self.styles.protection(self.style_id))
+    }
+
     pub fn text(&self) -> Option<&str> {
         match &self.value {
             Value::String(s) => Some(s.as_str()),
@@ -108,6 +140,10 @@ impl Cell {
             styles,
             write_font: None,
             write_fill: None,
+            write_number_format: None,
+            write_alignment: None,
+            write_border: None,
+            write_protection: None,
         }
     }
 
@@ -159,6 +195,10 @@ impl Worksheet {
                 styles: Arc::new(StyleSheet::default()),
                 write_font: None,
                 write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
             });
         cell.value = value.into();
     }
@@ -174,6 +214,10 @@ impl Worksheet {
                 styles: Arc::new(StyleSheet::default()),
                 write_font: None,
                 write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
             });
         cell.write_font = Some(font);
     }
@@ -189,8 +233,88 @@ impl Worksheet {
                 styles: Arc::new(StyleSheet::default()),
                 write_font: None,
                 write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
             });
         cell.write_fill = Some(fill);
+    }
+
+    pub fn set_cell_number_format(&mut self, reference: &str, number_format: &str) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
+            });
+        cell.write_number_format = Some(number_format.to_string());
+    }
+
+    pub fn set_cell_alignment(&mut self, reference: &str, alignment: Alignment) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
+            });
+        cell.write_alignment = Some(alignment);
+    }
+
+    pub fn set_cell_border(&mut self, reference: &str, border: Border) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
+            });
+        cell.write_border = Some(border);
+    }
+
+    pub fn set_cell_protection(&mut self, reference: &str, protection: Protection) {
+        let cell = self
+            .cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                write_number_format: None,
+                write_alignment: None,
+                write_border: None,
+                write_protection: None,
+            });
+        cell.write_protection = Some(protection);
     }
 
     pub fn merge_cells(&mut self, range: &str) {
@@ -211,6 +335,160 @@ impl Worksheet {
     pub fn row_height(&mut self, row: u32, height: f64) {
         self.row_heights.insert(row, height);
     }
+
+    pub fn min_row(&self) -> u32 {
+        self.used_bounds()
+            .map(|(_, min_row, _, _)| min_row)
+            .unwrap_or(1)
+    }
+
+    pub fn max_row(&self) -> u32 {
+        self.used_bounds()
+            .map(|(_, _, _, max_row)| max_row)
+            .unwrap_or(1)
+    }
+
+    pub fn min_column(&self) -> u32 {
+        self.used_bounds()
+            .map(|(min_col, _, _, _)| min_col)
+            .unwrap_or(1)
+    }
+
+    pub fn max_column(&self) -> u32 {
+        self.used_bounds()
+            .map(|(_, _, max_col, _)| max_col)
+            .unwrap_or(1)
+    }
+
+    pub fn iter_rows(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+    ) -> Vec<Vec<Cell>> {
+        let start_row = min_row.unwrap_or_else(|| self.min_row());
+        let end_row = max_row.unwrap_or_else(|| self.max_row());
+        let start_col = min_col.unwrap_or_else(|| self.min_column());
+        let end_col = max_col.unwrap_or_else(|| self.max_column());
+
+        if start_row > end_row || start_col > end_col {
+            return Vec::new();
+        }
+
+        let mut rows = Vec::with_capacity((end_row - start_row + 1) as usize);
+        for row in start_row..=end_row {
+            let mut current = Vec::with_capacity((end_col - start_col + 1) as usize);
+            for col in start_col..=end_col {
+                let reference = rc_to_a1(row, col);
+                let cell = self
+                    .cell(&reference)
+                    .cloned()
+                    .unwrap_or_else(|| Cell::empty(reference, Arc::new(StyleSheet::default())));
+                current.push(cell);
+            }
+            rows.push(current);
+        }
+
+        rows
+    }
+
+    pub fn iter_cols(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+    ) -> Vec<Vec<Cell>> {
+        let rows = self.iter_rows(min_row, max_row, min_col, max_col);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+
+        let height = rows.len();
+        let width = rows[0].len();
+        let mut cols = Vec::with_capacity(width);
+        for col_idx in 0..width {
+            let mut column = Vec::with_capacity(height);
+            for row in &rows {
+                column.push(row[col_idx].clone());
+            }
+            cols.push(column);
+        }
+
+        cols
+    }
+
+    pub fn rows(&self) -> Vec<Vec<Cell>> {
+        self.iter_rows(None, None, None, None)
+    }
+
+    pub fn columns(&self) -> Vec<Vec<Cell>> {
+        self.iter_cols(None, None, None, None)
+    }
+
+    pub fn values(&self) -> Vec<Vec<Value>> {
+        self.rows()
+            .into_iter()
+            .map(|row| row.into_iter().map(|cell| cell.value().clone()).collect())
+            .collect()
+    }
+
+    fn used_bounds(&self) -> Option<(u32, u32, u32, u32)> {
+        let mut min_col = u32::MAX;
+        let mut min_row = u32::MAX;
+        let mut max_col = 0;
+        let mut max_row = 0;
+
+        for reference in self.cells.keys() {
+            if let Some((row, col)) = parse_a1(reference) {
+                min_col = min_col.min(col);
+                min_row = min_row.min(row);
+                max_col = max_col.max(col);
+                max_row = max_row.max(row);
+            }
+        }
+
+        if max_row == 0 || max_col == 0 {
+            return None;
+        }
+
+        Some((min_col, min_row, max_col, max_row))
+    }
+}
+
+fn rc_to_a1(row: u32, col: u32) -> String {
+    let mut current = col;
+    let mut letters = String::new();
+
+    while current > 0 {
+        let rem = (current - 1) % 26;
+        letters.insert(0, (b'A' + rem as u8) as char);
+        current = (current - 1) / 26;
+    }
+
+    format!("{letters}{row}")
+}
+
+fn parse_a1(reference: &str) -> Option<(u32, u32)> {
+    let mut col = 0_u32;
+    let mut row_text = String::new();
+
+    for ch in reference.chars() {
+        if ch.is_ascii_alphabetic() {
+            let upper = ch.to_ascii_uppercase() as u32;
+            col = col * 26 + (upper - 'A' as u32 + 1);
+        } else if ch.is_ascii_digit() {
+            row_text.push(ch);
+        }
+    }
+
+    let row = row_text.parse::<u32>().ok()?;
+    if row == 0 || col == 0 {
+        return None;
+    }
+
+    Some((row, col))
 }
 
 #[derive(Debug, Clone)]
@@ -897,6 +1175,10 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_number_format: None,
+            write_alignment: None,
+            write_border: None,
+            write_protection: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -907,6 +1189,10 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_number_format: None,
+            write_alignment: None,
+            write_border: None,
+            write_protection: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -917,6 +1203,10 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_number_format: None,
+            write_alignment: None,
+            write_border: None,
+            write_protection: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -927,6 +1217,10 @@ mod tests {
             styles,
             write_font: None,
             write_fill: None,
+            write_number_format: None,
+            write_alignment: None,
+            write_border: None,
+            write_protection: None,
         };
         assert_eq!(empty_cell.text(), None);
     }

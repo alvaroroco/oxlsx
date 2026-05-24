@@ -350,3 +350,135 @@ def test_ws_rows_property(load_wb):
     rows = list(wb.active.rows)
     assert len(rows) == 1
     assert rows[0][0].value == "Hola"
+
+
+def test_number_format_round_trip(load_wb, new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = 42
+
+    if type(wb).__module__.startswith("openpyxl"):
+        ws["A1"].number_format = "#,##0.00"
+    else:
+        ws.set_cell_number_format("A1", "#,##0.00")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        assert wb2.active["A1"].number_format == "#,##0.00"
+    finally:
+        os.unlink(path)
+
+
+def test_alignment_round_trip(load_wb, new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = "hola"
+
+    if type(wb).__module__.startswith("openpyxl"):
+        ws["A1"].alignment = openpyxl.styles.Alignment(
+            horizontal="center", vertical="top", wrap_text=True, indent=2
+        )
+    else:
+        ws.set_cell_alignment(
+            "A1",
+            oxlsx.Alignment(horizontal="center", vertical="top", wrap_text=True, indent=2),
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        alignment = wb2.active["A1"].alignment
+        assert alignment.horizontal == "center"
+        assert alignment.vertical == "top"
+        assert alignment.wrap_text is True
+        assert alignment.indent == 2
+    finally:
+        os.unlink(path)
+
+
+def test_border_round_trip(load_wb, new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = "hola"
+
+    if type(wb).__module__.startswith("openpyxl"):
+        ws["A1"].border = openpyxl.styles.Border(
+            left=openpyxl.styles.Side(style="thin", color=openpyxl.styles.Color(theme=3)),
+            right=openpyxl.styles.Side(style="double", color=openpyxl.styles.Color(indexed=6)),
+        )
+    else:
+        ws.set_cell_border(
+            "A1",
+            oxlsx.Border(
+                left=oxlsx.Side(style="thin", color=oxlsx.Color(theme=3)),
+                right=oxlsx.Side(style="double", color=oxlsx.Color(indexed=6)),
+            ),
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        border = wb2.active["A1"].border
+        assert border.left.style == "thin"
+        assert border.right.style == "double"
+        assert border.left.color.theme == 3
+        assert border.right.color.indexed == 6
+    finally:
+        os.unlink(path)
+
+
+def test_protection_round_trip(load_wb, new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = "hola"
+
+    if type(wb).__module__.startswith("openpyxl"):
+        ws["A1"].protection = openpyxl.styles.Protection(locked=False, hidden=True)
+    else:
+        ws.set_cell_protection("A1", oxlsx.Protection(locked=False, hidden=True))
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        protection = wb2.active["A1"].protection
+        assert protection.locked is False
+        assert protection.hidden is True
+    finally:
+        os.unlink(path)
+
+
+def test_style_round_trip_preserves_existing_ids(load_wb):
+    wb = load_wb("samples/test.xlsx")
+    original_style = wb.active["A1"]._style if type(wb).__module__.startswith("openpyxl") else None
+
+    if type(wb).__module__.startswith("openpyxl"):
+        wb.active["C1"].number_format = "0.000"
+    else:
+        wb.active.set_cell_number_format("C1", "0.000")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        wb.save(path)
+        wb2 = load_wb(path)
+        if type(wb2).__module__.startswith("openpyxl"):
+            assert wb2.active["A1"]._style == original_style
+        else:
+            assert wb2.active["A1"].font.bold is True
+            assert wb2.active["A1"].fill.fg_color.indexed == 2
+    finally:
+        os.unlink(path)
