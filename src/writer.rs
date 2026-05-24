@@ -1,5 +1,5 @@
 use crate::styles::CellXf;
-use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
+use crate::{Border, Color, Fill, Font, OxlsxError, Side, StyleSheet, Value, Workbook, Worksheet};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
 use quick_xml::Writer;
@@ -16,6 +16,7 @@ use zip::write::SimpleFileOptions;
 pub(crate) struct CollectedStyles {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
+    pub borders: Vec<Border>,
     pub cell_xfs: Vec<CellXf>,
     pub num_fmts: Vec<(u32, String)>,
     pub cell_style_ids: HashMap<(usize, String), u32>,
@@ -49,11 +50,12 @@ pub(crate) fn collect_styles(
         .map(|sheet| sheet.cells().len())
         .sum::<usize>();
 
-    let (mut fonts, mut fills, mut cell_xfs, mut num_fmts) =
+    let (mut fonts, mut fills, mut borders, mut cell_xfs, mut num_fmts) =
         if preserve_original && let Some(source) = original {
             (
                 source.fonts.clone(),
                 source.fills.clone(),
+                source.borders.clone(),
                 source.cell_xfs.clone(),
                 source.num_fmts_vec(),
             )
@@ -61,6 +63,7 @@ pub(crate) fn collect_styles(
             (
                 vec![Font::default()],
                 vec![Fill::none(), Fill::gray125()],
+                vec![Border::default()],
                 vec![CellXf {
                     font_id: 0,
                     fill_id: 0,
@@ -87,6 +90,9 @@ pub(crate) fn collect_styles(
     }
     if cell_xfs.capacity() < cell_xfs.len() + styled_cells {
         cell_xfs.reserve(styled_cells);
+    }
+    if borders.capacity() < borders.len() + styled_cells {
+        borders.reserve(styled_cells);
     }
 
     let mut cell_style_ids = HashMap::with_capacity(styled_cells);
@@ -136,13 +142,14 @@ pub(crate) fn collect_styles(
 
             let font_idx = find_or_push(&mut fonts, font) as u32;
             let fill_idx = find_or_push(&mut fills, fill) as u32;
+            let border_idx = base_xf.border_id.min((borders.len().saturating_sub(1)) as u32);
             let style_id = find_or_push(
                 &mut cell_xfs,
                 CellXf {
                     font_id: font_idx,
                     fill_id: fill_idx,
                     num_fmt_id: base_xf.num_fmt_id,
-                    border_id: base_xf.border_id,
+                    border_id: border_idx,
                     alignment: base_xf.alignment.clone(),
                     protection: base_xf.protection.clone(),
                     apply_font: base_xf.apply_font || cell.write_font.is_some(),
@@ -218,6 +225,7 @@ pub(crate) fn collect_styles(
     CollectedStyles {
         fonts,
         fills,
+        borders,
         cell_xfs,
         num_fmts,
         cell_style_ids,
@@ -638,14 +646,11 @@ fn write_styles_xml(
     }
     write_end(&mut xml, "fills")?;
 
-    write_start(&mut xml, "borders", &[("count", "1")])?;
-    write_start(&mut xml, "border", &[])?;
-    write_empty(&mut xml, "left", &[])?;
-    write_empty(&mut xml, "right", &[])?;
-    write_empty(&mut xml, "top", &[])?;
-    write_empty(&mut xml, "bottom", &[])?;
-    write_empty(&mut xml, "diagonal", &[])?;
-    write_end(&mut xml, "border")?;
+    let border_count = collected.borders.len().to_string();
+    write_start(&mut xml, "borders", &[("count", border_count.as_str())])?;
+    for border in &collected.borders {
+        write_border(&mut xml, border)?;
+    }
     write_end(&mut xml, "borders")?;
 
     write_start(&mut xml, "cellStyleXfs", &[("count", "1")])?;
@@ -667,17 +672,68 @@ fn write_styles_xml(
         let font_id_str = xf.font_id.to_string();
         let fill_id_str = xf.fill_id.to_string();
         let num_fmt_id_str = xf.num_fmt_id.to_string();
-        write_empty(
-            &mut xml,
-            "xf",
-            &[
-                ("numFmtId", num_fmt_id_str.as_str()),
-                ("fontId", font_id_str.as_str()),
-                ("fillId", fill_id_str.as_str()),
-                ("borderId", "0"),
-                ("xfId", "0"),
-            ],
-        )?;
+        let border_id_str = xf.border_id.to_string();
+
+        let mut attrs: Vec<(&str, String)> = vec![
+            ("numFmtId", num_fmt_id_str),
+            ("fontId", font_id_str),
+            ("fillId", fill_id_str),
+            ("borderId", border_id_str),
+            ("xfId", "0".to_string()),
+        ];
+        if xf.apply_font {
+            attrs.push(("applyFont", "1".to_string()));
+        }
+        if xf.apply_fill {
+            attrs.push(("applyFill", "1".to_string()));
+        }
+        if xf.apply_border {
+            attrs.push(("applyBorder", "1".to_string()));
+        }
+        if xf.apply_number_format {
+            attrs.push(("applyNumberFormat", "1".to_string()));
+        }
+        if xf.apply_alignment {
+            attrs.push(("applyAlignment", "1".to_string()));
+        }
+        if xf.apply_protection {
+            attrs.push(("applyProtection", "1".to_string()));
+        }
+
+        let attrs_ref = attrs
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+
+        if xf.alignment.is_none() && xf.protection.is_none() {
+            write_empty(&mut xml, "xf", &attrs_ref)?;
+            continue;
+        }
+
+        write_start(&mut xml, "xf", &attrs_ref)?;
+        if let Some(alignment) = &xf.alignment {
+            let alignment_attrs = alignment
+                .to_xml_attributes()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let alignment_refs = alignment_attrs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            write_empty(&mut xml, "alignment", &alignment_refs)?;
+        }
+        if let Some(protection) = &xf.protection {
+            let protection_attrs = protection
+                .to_xml_attributes()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let protection_refs = protection_attrs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            write_empty(&mut xml, "protection", &protection_refs)?;
+        }
+        write_end(&mut xml, "xf")?;
     }
     write_end(&mut xml, "cellXfs")?;
 
@@ -736,6 +792,34 @@ pub(crate) fn write_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), O
 
     write_end(xml, "patternFill")?;
     write_end(xml, "fill")
+}
+
+fn write_border(xml: &mut Writer<Vec<u8>>, border: &Border) -> Result<(), OxlsxError> {
+    write_start(xml, "border", &[])?;
+    write_side(xml, "left", &border.left)?;
+    write_side(xml, "right", &border.right)?;
+    write_side(xml, "top", &border.top)?;
+    write_side(xml, "bottom", &border.bottom)?;
+    write_side(xml, "diagonal", &border.diagonal)?;
+    write_end(xml, "border")
+}
+
+fn write_side(xml: &mut Writer<Vec<u8>>, tag: &str, side: &Side) -> Result<(), OxlsxError> {
+    match (&side.style, &side.color) {
+        (None, None) => write_empty(xml, tag, &[]),
+        (style, color) => {
+            let style_value = style.clone().unwrap_or_default();
+            if style.is_some() {
+                write_start(xml, tag, &[("style", style_value.as_str())])?;
+            } else {
+                write_start(xml, tag, &[])?;
+            }
+            if let Some(color) = color {
+                write_color(xml, "color", color)?;
+            }
+            write_end(xml, tag)
+        }
+    }
 }
 
 fn write_shared_strings_xml(

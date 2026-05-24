@@ -143,10 +143,12 @@ pub struct Side {
 }
 
 impl Side {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn to_xml_parts(&self) -> (Option<String>, Option<Color>) {
         (self.style.clone(), self.color.clone())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_xml_parts(style: Option<&str>, color: Option<&Color>) -> Self {
         Self {
             style: style.map(str::to_owned),
@@ -165,6 +167,7 @@ pub struct Border {
 }
 
 impl Border {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn to_xml_sides(&self) -> HashMap<String, Side> {
         HashMap::from([
             ("left".to_string(), self.left.clone()),
@@ -175,6 +178,7 @@ impl Border {
         ])
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_xml_sides(sides: &HashMap<String, Side>) -> Self {
         Self {
             left: sides.get("left").cloned().unwrap_or_default(),
@@ -244,6 +248,7 @@ pub struct CellXf {
 }
 
 impl CellXf {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn to_xml_attributes(&self) -> HashMap<String, String> {
         HashMap::from([
             ("fontId".to_string(), self.font_id.to_string()),
@@ -277,6 +282,7 @@ impl CellXf {
         ])
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_xml_attributes(
         attrs: &HashMap<String, String>,
         alignment: Option<Alignment>,
@@ -317,6 +323,7 @@ impl CellXf {
 pub struct StyleSheet {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
+    pub borders: Vec<Border>,
     pub cell_xfs: Vec<CellXf>,
     num_fmts: HashMap<u32, String>,
 }
@@ -331,13 +338,21 @@ impl StyleSheet {
         let mut in_fonts = false;
         let mut in_fills = false;
         let mut in_cell_xfs = false;
+        let mut in_borders = false;
+        let mut in_border = false;
         let mut in_font = false;
         let mut in_fill = false;
         let mut in_pattern_fill = false;
         let mut in_num_fmts = false;
+        let mut in_xf = false;
+        let mut in_side = false;
 
         let mut cur_font = Font::default();
         let mut cur_fill = Fill::default();
+        let mut cur_border = Border::default();
+        let mut cur_side = Side::default();
+        let mut cur_side_name: Option<String> = None;
+        let mut cur_xf: Option<CellXf> = None;
 
         let mut sheet = StyleSheet::default();
 
@@ -346,6 +361,7 @@ impl StyleSheet {
                 Event::Start(e) => match e.local_name().as_ref() {
                     b"fonts" => in_fonts = true,
                     b"fills" => in_fills = true,
+                    b"borders" => in_borders = true,
                     b"cellXfs" => in_cell_xfs = true,
                     b"numFmts" => {
                         in_num_fmts = true;
@@ -362,6 +378,10 @@ impl StyleSheet {
                     b"fill" if in_fills => {
                         in_fill = true;
                         cur_fill = Fill::default();
+                    }
+                    b"border" if in_borders => {
+                        in_border = true;
+                        cur_border = Border::default();
                     }
                     b"patternFill" if in_fill => {
                         in_pattern_fill = true;
@@ -388,7 +408,8 @@ impl StyleSheet {
                         cur_fill.bg_color = parse_color(&e)?;
                     }
                     b"xf" if in_cell_xfs => {
-                        sheet.cell_xfs.push(CellXf {
+                        in_xf = true;
+                        cur_xf = Some(CellXf {
                             font_id: attr_value(&e, b"fontId")?
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0),
@@ -423,11 +444,32 @@ impl StyleSheet {
                                 .ok()
                                 .flatten()
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_protection: attr_value(&e, b"applyProtection")
-                                .ok()
-                                .flatten()
+                            apply_protection: attr_value(&e, b"applyProtection")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
                         });
+                    }
+                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_border => {
+                        in_side = true;
+                        cur_side_name = Some(String::from_utf8_lossy(e.local_name().as_ref()).to_string());
+                        cur_side = Side {
+                            style: attr_value(&e, b"style")?,
+                            color: None,
+                        };
+                    }
+                    b"color" if in_side => {
+                        cur_side.color = parse_color(&e)?;
+                    }
+                    b"alignment" if in_xf => {
+                        if let Some(xf) = cur_xf.as_mut() {
+                            let attrs = parse_attrs_map(&e)?;
+                            xf.alignment = Some(Alignment::from_xml_attributes(&attrs));
+                        }
+                    }
+                    b"protection" if in_xf => {
+                        if let Some(xf) = cur_xf.as_mut() {
+                            let attrs = parse_attrs_map(&e)?;
+                            xf.protection = Some(Protection::from_xml_attributes(&attrs));
+                        }
                     }
                     b"numFmt" if in_num_fmts => {
                         if let (Some(num_fmt_id), Some(format_code)) = (
@@ -477,31 +519,41 @@ impl StyleSheet {
                                 .unwrap_or(0),
                             alignment: None,
                             protection: None,
-                            apply_font: attr_value(&e, b"applyFont")
-                                .ok()
-                                .flatten()
+                            apply_font: attr_value(&e, b"applyFont")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_fill: attr_value(&e, b"applyFill")
-                                .ok()
-                                .flatten()
+                            apply_fill: attr_value(&e, b"applyFill")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_border: attr_value(&e, b"applyBorder")
-                                .ok()
-                                .flatten()
+                            apply_border: attr_value(&e, b"applyBorder")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_number_format: attr_value(&e, b"applyNumberFormat")
-                                .ok()
-                                .flatten()
+                            apply_number_format: attr_value(&e, b"applyNumberFormat")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_alignment: attr_value(&e, b"applyAlignment")
-                                .ok()
-                                .flatten()
+                            apply_alignment: attr_value(&e, b"applyAlignment")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
-                            apply_protection: attr_value(&e, b"applyProtection")
-                                .ok()
-                                .flatten()
+                            apply_protection: attr_value(&e, b"applyProtection")?
                                 .is_some_and(|v| parse_bool_like(Some(v.as_str()))),
                         });
+                    }
+                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_border => {
+                        let side = Side {
+                            style: attr_value(&e, b"style")?,
+                            color: None,
+                        };
+                        assign_side(&mut cur_border, e.local_name().as_ref(), side);
+                    }
+                    b"color" if in_side => {
+                        cur_side.color = parse_color(&e)?;
+                    }
+                    b"alignment" if in_xf => {
+                        if let Some(xf) = cur_xf.as_mut() {
+                            let attrs = parse_attrs_map(&e)?;
+                            xf.alignment = Some(Alignment::from_xml_attributes(&attrs));
+                        }
+                    }
+                    b"protection" if in_xf => {
+                        if let Some(xf) = cur_xf.as_mut() {
+                            let attrs = parse_attrs_map(&e)?;
+                            xf.protection = Some(Protection::from_xml_attributes(&attrs));
+                        }
                     }
                     b"numFmt" if in_num_fmts => {
                         if let (Some(num_fmt_id), Some(format_code)) = (
@@ -526,8 +578,25 @@ impl StyleSheet {
                     b"patternFill" => in_pattern_fill = false,
                     b"fonts" => in_fonts = false,
                     b"fills" => in_fills = false,
+                    b"borders" => in_borders = false,
                     b"cellXfs" => in_cell_xfs = false,
                     b"numFmts" => in_num_fmts = false,
+                    b"border" if in_borders => {
+                        in_border = false;
+                        sheet.borders.push(std::mem::take(&mut cur_border));
+                    }
+                    b"left" | b"right" | b"top" | b"bottom" | b"diagonal" if in_side => {
+                        if let Some(name) = cur_side_name.take() {
+                            assign_side(&mut cur_border, name.as_bytes(), std::mem::take(&mut cur_side));
+                        }
+                        in_side = false;
+                    }
+                    b"xf" if in_xf => {
+                        in_xf = false;
+                        if let Some(xf) = cur_xf.take() {
+                            sheet.cell_xfs.push(xf);
+                        }
+                    }
                     _ => {}
                 },
                 Event::Eof => break,
@@ -548,6 +617,26 @@ impl StyleSheet {
     pub fn fill(&self, style_id: StyleId) -> Option<&Fill> {
         let xf = self.cell_xfs.get(style_id.as_usize())?;
         self.fills.get(xf.fill_id as usize)
+    }
+
+    pub fn border(&self, style_id: StyleId) -> Option<&Border> {
+        let xf = self.cell_xfs.get(style_id.as_usize())?;
+        self.borders.get(xf.border_id as usize)
+    }
+
+    pub fn alignment(&self, style_id: StyleId) -> Option<&Alignment> {
+        let xf = self.cell_xfs.get(style_id.as_usize())?;
+        xf.alignment.as_ref()
+    }
+
+    pub fn protection(&self, style_id: StyleId) -> Option<&Protection> {
+        let xf = self.cell_xfs.get(style_id.as_usize())?;
+        xf.protection.as_ref()
+    }
+
+    pub fn number_format(&self, style_id: StyleId) -> Option<&str> {
+        let num_fmt_id = self.num_fmt_id(style_id)?;
+        builtin_num_fmt(num_fmt_id).or_else(|| self.num_fmts.get(&num_fmt_id).map(String::as_str))
     }
 
     pub fn num_fmt_id(&self, style_id: StyleId) -> Option<u32> {
@@ -588,6 +677,29 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
     Ok(None)
 }
 
+fn parse_attrs_map(e: &BytesStart<'_>) -> Result<HashMap<String, String>, OxlsxError> {
+    let mut attrs = HashMap::new();
+    for attr in e.attributes().with_checks(false) {
+        let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
+        attrs.insert(
+            String::from_utf8_lossy(attr.key.as_ref()).to_string(),
+            attr.unescape_value()?.into_owned(),
+        );
+    }
+    Ok(attrs)
+}
+
+fn assign_side(border: &mut Border, side_name: &[u8], side: Side) {
+    match side_name {
+        b"left" => border.left = side,
+        b"right" => border.right = side,
+        b"top" => border.top = side,
+        b"bottom" => border.bottom = side,
+        b"diagonal" => border.diagonal = side,
+        _ => {}
+    }
+}
+
 fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     if let Some(rgb) = attr_value(e, b"rgb")? {
         return Ok(Some(Color::Argb(rgb)));
@@ -608,6 +720,32 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
 
 fn parse_bool_like(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "TRUE" | "True"))
+}
+
+fn builtin_num_fmt(num_fmt_id: u32) -> Option<&'static str> {
+    match num_fmt_id {
+        0 => Some("General"),
+        1 => Some("0"),
+        2 => Some("0.00"),
+        3 => Some("#,##0"),
+        4 => Some("#,##0.00"),
+        9 => Some("0%"),
+        10 => Some("0.00%"),
+        11 => Some("0.00E+00"),
+        12 => Some("# ?/?"),
+        13 => Some("# ??/??"),
+        14 => Some("mm-dd-yy"),
+        15 => Some("d-mmm-yy"),
+        16 => Some("d-mmm"),
+        17 => Some("mmm-yy"),
+        18 => Some("h:mm AM/PM"),
+        19 => Some("h:mm:ss AM/PM"),
+        20 => Some("h:mm"),
+        21 => Some("h:mm:ss"),
+        22 => Some("m/d/yy h:mm"),
+        49 => Some("@"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -764,5 +902,52 @@ mod tests {
         let attrs = xf.to_xml_attributes();
         let reparsed = CellXf::from_xml_attributes(&attrs, xf.alignment.clone(), xf.protection.clone());
         assert_eq!(reparsed, xf);
+    }
+
+    #[test]
+    fn parses_border_alignment_and_protection_from_cell_xf() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><name val="Calibri"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color theme="4"/></left>
+      <right style="double"><color indexed="3"/></right>
+      <top/><bottom/><diagonal/>
+    </border>
+  </borders>
+  <cellXfs count="2">
+    <xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/>
+    <xf fontId="0" fillId="0" borderId="1" numFmtId="165" xfId="0" applyBorder="1" applyAlignment="1" applyProtection="1">
+      <alignment horizontal="center" vertical="top" wrapText="1" indent="2"/>
+      <protection locked="0" hidden="1"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#;
+
+        let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
+        let xf = &sheet.cell_xfs[1];
+        assert_eq!(xf.border_id, 1);
+        assert!(xf.apply_border);
+        assert!(xf.apply_alignment);
+        assert!(xf.apply_protection);
+
+        let alignment = xf.alignment.as_ref().unwrap();
+        assert_eq!(alignment.horizontal.as_deref(), Some("center"));
+        assert_eq!(alignment.vertical.as_deref(), Some("top"));
+        assert!(alignment.wrap_text);
+        assert_eq!(alignment.indent, 2);
+
+        let protection = xf.protection.as_ref().unwrap();
+        assert!(!protection.locked);
+        assert!(protection.hidden);
+
+        let border = sheet.border(StyleId(1)).unwrap();
+        assert_eq!(border.left.style.as_deref(), Some("thin"));
+        assert_eq!(border.left.color, Some(Color::Theme(4)));
+        assert_eq!(border.right.style.as_deref(), Some("double"));
+        assert_eq!(border.right.color, Some(Color::Indexed(3)));
     }
 }
