@@ -375,3 +375,40 @@ fn rmw_save_to_same_path() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn write_formula_cell() {
+    let path = temp_path("oxlsx_write_formula.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut()
+        .unwrap()
+        .set_cell("A1", Value::Formula("SUM(B1:B3)".to_string()));
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::Formula("SUM(B1:B3)".to_string())
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_date_with_num_fmt() {
+    let path = temp_path("oxlsx_write_date_num_fmt.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell(
+        "A1",
+        Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap()),
+    );
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
+        &Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
+    );
+
+    fs::remove_file(path).ok();
+}

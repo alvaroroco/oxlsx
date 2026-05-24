@@ -307,6 +307,7 @@ fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {
                 .expect("NaiveDate is always a valid Python date")
                 .into_py(py)
         }
+        Value::Formula(formula) => format!("={formula}").into_py(py),
     }
 }
 

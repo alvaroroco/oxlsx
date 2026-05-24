@@ -130,6 +130,43 @@ pub(crate) fn collect_styles(
         }
     }
 
+    for (sheet_idx, sheet) in sheets.iter().enumerate() {
+        for (reference, cell) in sheet.cells() {
+            if !matches!(cell.value(), Value::Date(_)) {
+                continue;
+            }
+
+            let style_key = (sheet_idx, reference.clone());
+            let existing_style_id = cell_style_ids
+                .get(&style_key)
+                .copied()
+                .unwrap_or(cell.style_id().as_usize() as u32);
+
+            let existing_xf = cell_xfs
+                .get(existing_style_id as usize)
+                .cloned()
+                .unwrap_or(CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 0,
+                });
+
+            if is_builtin_date_num_fmt(existing_xf.num_fmt_id) {
+                continue;
+            }
+
+            let style_id = find_or_push(
+                &mut cell_xfs,
+                CellXf {
+                    font_id: existing_xf.font_id,
+                    fill_id: existing_xf.fill_id,
+                    num_fmt_id: 14,
+                },
+            ) as u32;
+            cell_style_ids.insert(style_key, style_id);
+        }
+    }
+
     num_fmts.sort_by_key(|(id, _)| *id);
 
     CollectedStyles {
@@ -148,6 +185,10 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
         items.push(value);
         items.len() - 1
     }
+}
+
+fn is_builtin_date_num_fmt(num_fmt_id: u32) -> bool {
+    (14..=17).contains(&num_fmt_id) || num_fmt_id == 22
 }
 
 pub fn write_xlsx(
@@ -695,6 +736,13 @@ fn write_cell(
             let value = date_to_excel_serial(*date).to_string();
             xml.write_event(Event::Text(BytesText::new(&value)))?;
             write_end(xml, "v")?;
+            write_end(xml, "c")?;
+        }
+        Value::Formula(formula) => {
+            write_start(xml, "c", &base)?;
+            write_start(xml, "f", &[])?;
+            xml.write_event(Event::Text(BytesText::new(formula)))?;
+            write_end(xml, "f")?;
             write_end(xml, "c")?;
         }
         Value::Empty => {}
