@@ -3,11 +3,18 @@ name = "oxlsx"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+python = ["dep:pyo3"]
+
 [dependencies]
 quick-xml = "0.36"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 thiserror = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

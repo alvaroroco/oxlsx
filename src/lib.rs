@@ -1,4 +1,6 @@
 pub mod error;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod reader;
 pub mod readonly;
 pub mod shared_strings;
