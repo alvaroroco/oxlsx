@@ -1,10 +1,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::useless_conversion)]
 
+use crate::coords::rc_to_a1;
 use crate::{Cell, Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook};
 use chrono::Datelike;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule};
+use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[pymodule]
@@ -172,9 +173,102 @@ impl PyWorksheet {
     }
 
     #[pyo3(signature = (*, row, column))]
-    fn cell(&self, row: usize, column: usize) -> PyResult<PyCell> {
+    fn cell(&self, row: u32, column: u32) -> PyResult<PyCell> {
         let coord = rc_to_a1(row, column);
         self.cell_from_coord(&coord)
+    }
+
+    #[getter]
+    fn max_row(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.max_row())
+    }
+
+    #[getter]
+    fn max_column(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.max_column())
+    }
+
+    #[getter]
+    fn min_row(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.min_row())
+    }
+
+    #[getter]
+    fn min_column(&self) -> PyResult<u32> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.min_column())
+    }
+
+    #[pyo3(signature = (min_row=None, max_row=None, min_col=None, max_col=None, values_only=false))]
+    fn iter_rows(
+        &self,
+        py: Python<'_>,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<Vec<Py<PyTuple>>> {
+        let rows = {
+            let workbook = self.lock()?;
+            let sheet = workbook
+                .sheet(self.sheet_index)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+            sheet.iter_rows(min_row, max_row, min_col, max_col)
+        };
+
+        rows_to_py_tuples(py, rows, values_only)
+    }
+
+    #[pyo3(signature = (min_col=None, max_col=None, min_row=None, max_row=None, values_only=false))]
+    fn iter_cols(
+        &self,
+        py: Python<'_>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<Vec<Py<PyTuple>>> {
+        let cols = {
+            let workbook = self.lock()?;
+            let sheet = workbook
+                .sheet(self.sheet_index)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+            sheet.iter_cols(min_row, max_row, min_col, max_col)
+        };
+
+        rows_to_py_tuples(py, cols, values_only)
+    }
+
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_rows(py, None, None, None, None, false)
+    }
+
+    #[getter]
+    fn columns(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_cols(py, None, None, None, None, false)
+    }
+
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyTuple>>> {
+        self.iter_rows(py, None, None, None, None, true)
     }
 
     fn merge_cells(&self, range: &str) -> PyResult<()> {
@@ -308,20 +402,30 @@ impl PyColor {
     }
 }
 
-fn rc_to_a1(row: usize, col: usize) -> String {
-    assert!(row >= 1, "row must be 1-based");
-    assert!(col >= 1, "col must be 1-based");
+fn rows_to_py_tuples(
+    py: Python<'_>,
+    rows: Vec<Vec<Cell>>,
+    values_only: bool,
+) -> PyResult<Vec<Py<PyTuple>>> {
+    let mut tuples = Vec::with_capacity(rows.len());
 
-    let mut current = col;
-    let mut letters = String::new();
-
-    while current > 0 {
-        let rem = (current - 1) % 26;
-        letters.insert(0, (b'A' + rem as u8) as char);
-        current = (current - 1) / 26;
+    for row in rows {
+        let mut items: Vec<PyObject> = Vec::with_capacity(row.len());
+        if values_only {
+            for cell in row {
+                items.push(value_to_py(cell.value(), py));
+            }
+        } else {
+            for cell in row {
+                let py_cell = Py::new(py, PyCell { inner: cell })?;
+                items.push(py_cell.into_py(py));
+            }
+        }
+        let tuple = PyTuple::new_bound(py, items).unbind();
+        tuples.push(tuple);
     }
 
-    format!("{letters}{row}")
+    Ok(tuples)
 }
 
 fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {
@@ -399,19 +503,11 @@ fn map_oxlsx_error(err: OxlsxError) -> PyErr {
 
 #[cfg(test)]
 mod tests {
-    use super::{py_to_value, rc_to_a1, value_to_py};
+    use super::{py_to_value, value_to_py};
     use crate::Value;
     use chrono::NaiveDate;
     use pyo3::prelude::*;
     use pyo3::types::{PyDate, PyDateAccess};
-
-    #[test]
-    fn rc_to_a1_converts_expected_coordinates() {
-        assert_eq!(rc_to_a1(1, 1), "A1");
-        assert_eq!(rc_to_a1(1, 26), "Z1");
-        assert_eq!(rc_to_a1(1, 27), "AA1");
-        assert_eq!(rc_to_a1(10, 52), "AZ10");
-    }
 
     #[test]
     fn value_to_py_maps_supported_variants() {

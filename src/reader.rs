@@ -1,3 +1,4 @@
+use crate::coords::{column_index, rc_to_a1};
 use crate::workbook_rels::parse_sheet_refs;
 use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
@@ -211,6 +212,155 @@ impl Worksheet {
     pub fn row_height(&mut self, row: u32, height: f64) {
         self.row_heights.insert(row, height);
     }
+
+    pub fn max_row(&self) -> u32 {
+        self.used_bounds().map_or(1, |(_, _, _, max_row)| max_row)
+    }
+
+    pub fn max_column(&self) -> u32 {
+        self.used_bounds().map_or(1, |(_, max_col, _, _)| max_col)
+    }
+
+    pub fn min_row(&self) -> u32 {
+        self.used_bounds().map_or(1, |(_, _, min_row, _)| min_row)
+    }
+
+    pub fn min_column(&self) -> u32 {
+        self.used_bounds().map_or(1, |(min_col, _, _, _)| min_col)
+    }
+
+    pub fn iter_rows(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+    ) -> Vec<Vec<Cell>> {
+        let default_min_row = self.min_row();
+        let default_max_row = self.max_row();
+        let default_min_col = self.min_column();
+        let default_max_col = self.max_column();
+
+        let min_row = min_row.unwrap_or(default_min_row);
+        let max_row = max_row.unwrap_or(default_max_row);
+        let min_col = min_col.unwrap_or(default_min_col);
+        let max_col = max_col.unwrap_or(default_max_col);
+
+        if min_row > max_row || min_col > max_col {
+            return Vec::new();
+        }
+
+        let styles = Arc::new(StyleSheet::default());
+        let mut rows = Vec::new();
+        for row in min_row..=max_row {
+            let mut current = Vec::new();
+            for col in min_col..=max_col {
+                let reference = rc_to_a1(row, col);
+                current.push(
+                    self.cells
+                        .get(&reference)
+                        .cloned()
+                        .unwrap_or_else(|| Cell::empty(reference, styles.clone())),
+                );
+            }
+            rows.push(current);
+        }
+
+        rows
+    }
+
+    pub fn iter_cols(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+    ) -> Vec<Vec<Cell>> {
+        let default_min_row = self.min_row();
+        let default_max_row = self.max_row();
+        let default_min_col = self.min_column();
+        let default_max_col = self.max_column();
+
+        let min_row = min_row.unwrap_or(default_min_row);
+        let max_row = max_row.unwrap_or(default_max_row);
+        let min_col = min_col.unwrap_or(default_min_col);
+        let max_col = max_col.unwrap_or(default_max_col);
+
+        if min_row > max_row || min_col > max_col {
+            return Vec::new();
+        }
+
+        let styles = Arc::new(StyleSheet::default());
+        let mut cols = Vec::new();
+        for col in min_col..=max_col {
+            let mut current = Vec::new();
+            for row in min_row..=max_row {
+                let reference = rc_to_a1(row, col);
+                current.push(
+                    self.cells
+                        .get(&reference)
+                        .cloned()
+                        .unwrap_or_else(|| Cell::empty(reference, styles.clone())),
+                );
+            }
+            cols.push(current);
+        }
+
+        cols
+    }
+
+    pub fn rows(&self) -> Vec<Vec<Cell>> {
+        self.iter_rows(None, None, None, None)
+    }
+
+    pub fn columns(&self) -> Vec<Vec<Cell>> {
+        self.iter_cols(None, None, None, None)
+    }
+
+    pub fn values(&self) -> Vec<Vec<Value>> {
+        self.iter_rows(None, None, None, None)
+            .into_iter()
+            .map(|row| row.into_iter().map(|cell| cell.value().clone()).collect())
+            .collect()
+    }
+
+    fn used_bounds(&self) -> Option<(u32, u32, u32, u32)> {
+        let mut min_col = u32::MAX;
+        let mut max_col = 0;
+        let mut min_row = u32::MAX;
+        let mut max_row = 0;
+
+        for reference in self.cells.keys() {
+            let Some((row, col)) = parse_a1(reference) else {
+                continue;
+            };
+
+            min_col = min_col.min(col);
+            max_col = max_col.max(col);
+            min_row = min_row.min(row);
+            max_row = max_row.max(row);
+        }
+
+        if max_row == 0 || max_col == 0 {
+            None
+        } else {
+            Some((min_col, max_col, min_row, max_row))
+        }
+    }
+}
+
+fn parse_a1(reference: &str) -> Option<(u32, u32)> {
+    let col = column_index(reference)?;
+    let row_start = reference
+        .bytes()
+        .position(|b| !b.is_ascii_alphabetic())
+        .unwrap_or(reference.len());
+    if row_start == reference.len() {
+        return None;
+    }
+
+    let row = reference.get(row_start..)?.parse::<u32>().ok()?;
+    Some((row, col))
 }
 
 #[derive(Debug, Clone)]
@@ -1117,6 +1267,75 @@ mod tests {
 
         let cell = ws.cell("A1").unwrap();
         assert!(cell.write_fill.is_some());
+    }
+
+    #[test]
+    fn worksheet_bounds_scan_from_cells() {
+        let mut ws = Worksheet::new("Data");
+        ws.set_cell("C3", "three");
+        ws.set_cell("A2", "two");
+        ws.set_cell("B5", "five");
+
+        assert_eq!(ws.min_row(), 2);
+        assert_eq!(ws.max_row(), 5);
+        assert_eq!(ws.min_column(), 1);
+        assert_eq!(ws.max_column(), 3);
+    }
+
+    #[test]
+    fn worksheet_iter_rows_rectangular() {
+        let mut ws = Worksheet::new("Data");
+        ws.set_cell("A1", "left");
+        ws.set_cell("C1", "right");
+        ws.set_cell("B2", 42.0_f64);
+
+        let rows = ws.iter_rows(Some(1), Some(2), Some(1), Some(3));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), 3);
+        assert_eq!(rows[1].len(), 3);
+
+        assert_eq!(rows[0][0].value(), &Value::String("left".to_string()));
+        assert_eq!(rows[0][1].value(), &Value::Empty);
+        assert_eq!(rows[0][2].value(), &Value::String("right".to_string()));
+        assert_eq!(rows[1][0].value(), &Value::Empty);
+        assert_eq!(rows[1][1].value(), &Value::Number(42.0));
+        assert_eq!(rows[1][2].value(), &Value::Empty);
+    }
+
+    #[test]
+    fn worksheet_iter_cols_rectangular() {
+        let mut ws = Worksheet::new("Data");
+        ws.set_cell("A1", "top");
+        ws.set_cell("A3", "bottom");
+        ws.set_cell("B2", 7_i64);
+
+        let cols = ws.iter_cols(Some(1), Some(3), Some(1), Some(2));
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].len(), 3);
+        assert_eq!(cols[1].len(), 3);
+
+        assert_eq!(cols[0][0].value(), &Value::String("top".to_string()));
+        assert_eq!(cols[0][1].value(), &Value::Empty);
+        assert_eq!(cols[0][2].value(), &Value::String("bottom".to_string()));
+        assert_eq!(cols[1][0].value(), &Value::Empty);
+        assert_eq!(cols[1][1].value(), &Value::Number(7.0));
+        assert_eq!(cols[1][2].value(), &Value::Empty);
+    }
+
+    #[test]
+    fn worksheet_values_property_returns_values_only() {
+        let mut ws = Worksheet::new("Data");
+        ws.set_cell("A1", "name");
+        ws.set_cell("B1", 42_i64);
+        ws.set_cell("A2", true);
+
+        let values = ws.values();
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values[0],
+            vec![Value::String("name".to_string()), Value::Number(42.0)]
+        );
+        assert_eq!(values[1], vec![Value::Bool(true), Value::Empty]);
     }
 
     #[test]
