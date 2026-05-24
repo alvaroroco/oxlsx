@@ -293,6 +293,10 @@ impl Workbook {
         self.sheets.get(index)
     }
 
+    pub fn sheet_mut(&mut self, index: usize) -> Option<&mut Worksheet> {
+        self.sheets.get_mut(index)
+    }
+
     pub fn create_sheet(&mut self, name: &str) -> &mut Worksheet {
         self.sheets.push(Worksheet::new(name));
         self.sheets
