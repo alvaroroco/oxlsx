@@ -174,3 +174,84 @@ fn phase4_round_trip_multi_sheet() {
     );
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn readonly_open_returns_ok() {
+    let wb = Workbook::open_readonly("samples/test.xlsx");
+    assert!(wb.is_ok());
+}
+
+#[test]
+fn readonly_sheetnames() {
+    let wb = Workbook::open_readonly("samples/multi_sheet.xlsx").unwrap();
+    assert_eq!(wb.sheetnames(), vec!["Empleados", "Productos"]);
+}
+
+#[test]
+fn readonly_active_title() {
+    let wb = Workbook::open_readonly("samples/multi_sheet.xlsx").unwrap();
+    assert_eq!(wb.active().unwrap().title(), "Empleados");
+}
+
+#[test]
+fn readonly_sheet_by_index() {
+    let wb = Workbook::open_readonly("samples/multi_sheet.xlsx").unwrap();
+    assert_eq!(wb.sheet(1).unwrap().title(), "Productos");
+}
+
+#[test]
+fn readonly_rows_a1_value() {
+    let wb = Workbook::open_readonly("samples/test.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+    let first_row = ws.rows().next().unwrap();
+    assert_eq!(first_row[0].value(), &Value::String("Hola".to_string()));
+}
+
+#[test]
+fn readonly_rows_c1_value() {
+    let wb = Workbook::open_readonly("samples/test.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+    let first_row = ws.rows().next().unwrap();
+    assert_eq!(first_row[2].value(), &Value::Number(42.0));
+}
+
+#[test]
+fn readonly_rows_multi_sheet() {
+    let wb = Workbook::open_readonly("samples/multi_sheet.xlsx").unwrap();
+    let ws = wb.sheet(1).unwrap();
+    let first_row = ws.rows().next().unwrap();
+    assert_eq!(first_row[0].value(), &Value::String("Laptop".to_string()));
+}
+
+#[test]
+fn readonly_independent_iterators() {
+    let wb = Workbook::open_readonly("samples/test.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    let mut rows_a = ws.rows();
+    let mut rows_b = ws.rows();
+
+    let row_a = rows_a.next().unwrap();
+    let row_b = rows_b.next().unwrap();
+
+    assert_eq!(row_a[0].value(), row_b[0].value());
+    assert_eq!(row_a[2].value(), row_b[2].value());
+}
+
+#[test]
+fn readonly_streaming_style_resolution() {
+    let wb = Workbook::open_readonly("samples/test.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+    let first_row = ws.rows().next().unwrap();
+
+    assert!(first_row[0].font().unwrap().bold);
+    assert_eq!(
+        first_row[0].fill().unwrap().fg_color,
+        Some(Color::Indexed(2))
+    );
+    assert_eq!(first_row[1].font().unwrap().color, Some(Color::Indexed(4)));
+    assert_eq!(
+        first_row[1].fill().unwrap().fg_color,
+        Some(Color::Indexed(5))
+    );
+}
