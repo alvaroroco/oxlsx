@@ -219,14 +219,12 @@ impl<R: BufRead> Iterator for RowIter<R> {
                 }
                 Ok(Event::Empty(ref e)) if e.local_name().as_ref() == b"c" => {
                     let _ = self.decoder.start_cell(e);
-                    if let Some(cell) = self.decoder.finish_cell(self.styles.clone())
-                        && self.in_row
-                    {
-                        if let Some(col) =
+                    if self.in_row
+                        && let Some(cell) = self.decoder.finish_cell(self.styles.clone())
+                        && let Some(col) =
                             column_index(cell.reference()).and_then(|c| usize::try_from(c).ok())
-                        {
-                            self.row_cells.push((col, cell));
-                        }
+                    {
+                        self.row_cells.push((col, cell));
                     }
                 }
                 Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"v" => {
@@ -267,14 +265,12 @@ impl<R: BufRead> Iterator for RowIter<R> {
                     self.decoder.end_inline_str();
                 }
                 Ok(Event::End(ref e)) if e.local_name().as_ref() == b"c" => {
-                    if let Some(cell) = self.decoder.finish_cell(self.styles.clone())
-                        && self.in_row
-                    {
-                        if let Some(col) =
+                    if self.in_row
+                        && let Some(cell) = self.decoder.finish_cell(self.styles.clone())
+                        && let Some(col) =
                             column_index(cell.reference()).and_then(|c| usize::try_from(c).ok())
-                        {
-                            self.row_cells.push((col, cell));
-                        }
+                    {
+                        self.row_cells.push((col, cell));
                     }
                 }
                 Ok(Event::Eof) => {
