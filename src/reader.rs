@@ -1,4 +1,4 @@
-use crate::coords::{column_index, rc_to_a1};
+use crate::coords::{parse_a1, rc_to_a1};
 use crate::workbook_rels::parse_sheet_refs;
 use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
@@ -347,20 +347,6 @@ impl Worksheet {
             Some((min_col, max_col, min_row, max_row))
         }
     }
-}
-
-fn parse_a1(reference: &str) -> Option<(u32, u32)> {
-    let col = column_index(reference)?;
-    let row_start = reference
-        .bytes()
-        .position(|b| !b.is_ascii_alphabetic())
-        .unwrap_or(reference.len());
-    if row_start == reference.len() {
-        return None;
-    }
-
-    let row = reference.get(row_start..)?.parse::<u32>().ok()?;
-    Some((row, col))
 }
 
 #[derive(Debug, Clone)]
