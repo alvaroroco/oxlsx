@@ -9,6 +9,7 @@ A failure in both → bad fixture or broken sample file.
 import datetime
 import os
 import tempfile
+import zipfile
 
 import openpyxl
 import pytest
@@ -217,5 +218,55 @@ def test_rmw_preserves_font(load_wb):
         wb.save(path)
         wb2 = load_wb(path)
         assert wb2.active["A1"].font.bold is True
+    finally:
+        os.unlink(path)
+
+
+def test_write_formula(new_wb, load_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = "=SUM(B1:B3)"
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        value = wb2.active["A1"].value
+        assert isinstance(value, str)
+        assert value == "=SUM(B1:B3)"
+    finally:
+        os.unlink(path)
+
+
+def test_write_date_renders_as_date(new_wb, load_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws["A1"] = datetime.date(2025, 1, 21)
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        save(path)
+        wb2 = load_wb(path)
+        value = wb2.active["A1"].value
+        assert isinstance(value, datetime.date)
+        assert value.year == 2025 and value.month == 1 and value.day == 21
+    finally:
+        os.unlink(path)
+
+
+def test_write_merge_cells(new_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws.merge_cells("A1:C1")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        save(path)
+        with zipfile.ZipFile(path, "r") as zf:
+            sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert '<mergeCell ref="A1:C1"' in sheet_xml
     finally:
         os.unlink(path)

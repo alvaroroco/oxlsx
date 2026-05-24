@@ -18,6 +18,7 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Date(NaiveDate),
+    Formula(String),
 }
 
 impl From<&str> for Value {
@@ -119,6 +120,9 @@ impl Cell {
 pub struct Worksheet {
     name: String,
     cells: HashMap<String, Cell>,
+    pub(crate) merged_cells: Vec<String>,
+    pub(crate) column_widths: HashMap<u32, f64>,
+    pub(crate) row_heights: HashMap<u32, f64>,
 }
 
 impl Worksheet {
@@ -126,6 +130,9 @@ impl Worksheet {
         Self {
             name: name.to_string(),
             cells: HashMap::new(),
+            merged_cells: Vec::new(),
+            column_widths: HashMap::new(),
+            row_heights: HashMap::new(),
         }
     }
 
@@ -184,6 +191,25 @@ impl Worksheet {
                 write_fill: None,
             });
         cell.write_fill = Some(fill);
+    }
+
+    pub fn merge_cells(&mut self, range: &str) {
+        let range = range.to_string();
+        if !self.merged_cells.contains(&range) {
+            self.merged_cells.push(range);
+        }
+    }
+
+    pub fn unmerge_cells(&mut self, range: &str) {
+        self.merged_cells.retain(|existing| existing != range);
+    }
+
+    pub fn column_width(&mut self, col: u32, width: f64) {
+        self.column_widths.insert(col, width);
+    }
+
+    pub fn row_height(&mut self, row: u32, height: f64) {
+        self.row_heights.insert(row, height);
     }
 }
 
@@ -333,14 +359,31 @@ fn parse_sheet<R: BufRead>(
     let mut buf = Vec::new();
     let mut decoder = CellDecoder::new(shared_strings);
     let mut cells: HashMap<String, Cell> = HashMap::new();
+    let mut merged_cells = Vec::new();
+    let mut column_widths = HashMap::new();
+    let mut row_heights = HashMap::new();
 
     loop {
         match xml.read_event_into(&mut buf)? {
             Event::Start(e) if e.local_name().as_ref() == b"c" => {
                 decoder.start_cell(&e)?;
             }
+            Event::Start(e) if e.local_name().as_ref() == b"row" => {
+                parse_row_height(&e, &mut row_heights)?;
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"col" => {
+                parse_column_widths(&e, &mut column_widths)?;
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"mergeCell" => {
+                if let Some(range_ref) = attr_value(&e, b"ref")? {
+                    merged_cells.push(range_ref);
+                }
+            }
             Event::Start(e) if e.local_name().as_ref() == b"v" => {
                 decoder.start_value();
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"f" => {
+                decoder.start_formula();
             }
             Event::Start(e) if decoder.in_inline_str() && e.local_name().as_ref() == b"is" => {
                 decoder.start_inline_str();
@@ -351,14 +394,31 @@ fn parse_sheet<R: BufRead>(
             Event::Empty(e) if decoder.in_inline_str() && e.local_name().as_ref() == b"t" => {
                 decoder.end_inline_text();
             }
+            Event::Empty(e) if e.local_name().as_ref() == b"row" => {
+                parse_row_height(&e, &mut row_heights)?;
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"col" => {
+                parse_column_widths(&e, &mut column_widths)?;
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"mergeCell" => {
+                if let Some(range_ref) = attr_value(&e, b"ref")? {
+                    merged_cells.push(range_ref);
+                }
+            }
             Event::Text(t) if decoder.in_value() => {
                 decoder.push_value_text(&t.unescape()?);
+            }
+            Event::Text(t) if decoder.in_formula() => {
+                decoder.push_formula_text(&t.unescape()?);
             }
             Event::Text(t) if decoder.in_inline_text() => {
                 decoder.push_inline_text(&t.unescape()?);
             }
             Event::End(e) if e.local_name().as_ref() == b"v" => {
                 decoder.end_value(&styles);
+            }
+            Event::End(e) if e.local_name().as_ref() == b"f" => {
+                decoder.end_formula();
             }
             Event::End(e) if e.local_name().as_ref() == b"t" => {
                 decoder.end_inline_text();
@@ -381,6 +441,9 @@ fn parse_sheet<R: BufRead>(
     Ok(Worksheet {
         name: String::new(),
         cells,
+        merged_cells,
+        column_widths,
+        row_heights,
     })
 }
 
@@ -390,6 +453,7 @@ struct CellBuilder {
     style_id: StyleId,
     cell_type: String,
     value: Value,
+    formula_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +462,7 @@ pub(crate) struct CellDecoder {
     value_text: String,
     inline_text: String,
     in_value: bool,
+    in_formula: bool,
     in_inline_str: bool,
     in_inline_text: bool,
     current: Option<CellBuilder>,
@@ -410,6 +475,7 @@ impl CellDecoder {
             value_text: String::new(),
             inline_text: String::new(),
             in_value: false,
+            in_formula: false,
             in_inline_str: false,
             in_inline_text: false,
             current: None,
@@ -422,6 +488,7 @@ impl CellDecoder {
             value_text: String::new(),
             inline_text: String::new(),
             in_value: false,
+            in_formula: false,
             in_inline_str: false,
             in_inline_text: false,
             current: None,
@@ -441,6 +508,7 @@ impl CellDecoder {
             style_id,
             cell_type: cell_type.clone(),
             value: Value::Empty,
+            formula_text: String::new(),
         });
         self.in_inline_str = cell_type == "inlineStr";
         self.in_inline_text = false;
@@ -463,6 +531,10 @@ impl CellDecoder {
         self.in_value = false;
 
         if let Some(builder) = self.current.as_mut() {
+            if matches!(builder.value, Value::Formula(_)) {
+                return;
+            }
+
             let mut value = match builder.cell_type.as_str() {
                 "s" => self
                     .value_text
@@ -497,6 +569,30 @@ impl CellDecoder {
         }
     }
 
+    pub(crate) fn start_formula(&mut self) {
+        if let Some(builder) = self.current.as_mut() {
+            builder.formula_text.clear();
+            self.in_formula = true;
+        }
+    }
+
+    pub(crate) fn push_formula_text(&mut self, text: &str) {
+        if self.in_formula
+            && let Some(builder) = self.current.as_mut()
+        {
+            builder.formula_text.push_str(text);
+        }
+    }
+
+    pub(crate) fn end_formula(&mut self) {
+        self.in_formula = false;
+        if let Some(builder) = self.current.as_mut()
+            && !builder.formula_text.is_empty()
+        {
+            builder.value = Value::Formula(mem::take(&mut builder.formula_text));
+        }
+    }
+
     pub(crate) fn start_inline_text(&mut self) {
         if self.in_inline_str {
             self.in_inline_text = true;
@@ -522,6 +618,7 @@ impl CellDecoder {
     pub(crate) fn finish_cell(&mut self, styles: Arc<StyleSheet>) -> Option<Cell> {
         self.in_inline_str = false;
         self.in_inline_text = false;
+        self.in_formula = false;
 
         let builder = self.current.take()?;
         if builder.reference.is_empty() {
@@ -544,6 +641,10 @@ impl CellDecoder {
         self.in_inline_str
     }
 
+    pub(crate) fn in_formula(&self) -> bool {
+        self.in_formula
+    }
+
     pub(crate) fn in_inline_text(&self) -> bool {
         self.in_inline_text
     }
@@ -558,6 +659,37 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
     }
 
     Ok(None)
+}
+
+fn parse_column_widths(
+    e: &BytesStart<'_>,
+    column_widths: &mut HashMap<u32, f64>,
+) -> Result<(), OxlsxError> {
+    let width = attr_value(e, b"width")?.and_then(|v| v.parse::<f64>().ok());
+    let min = attr_value(e, b"min")?.and_then(|v| v.parse::<u32>().ok());
+    let max = attr_value(e, b"max")?.and_then(|v| v.parse::<u32>().ok());
+
+    if let (Some(width), Some(min), Some(max)) = (width, min, max) {
+        for col in min..=max {
+            column_widths.insert(col, width);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_row_height(
+    e: &BytesStart<'_>,
+    row_heights: &mut HashMap<u32, f64>,
+) -> Result<(), OxlsxError> {
+    let row = attr_value(e, b"r")?.and_then(|v| v.parse::<u32>().ok());
+    let height = attr_value(e, b"ht")?.and_then(|v| v.parse::<f64>().ok());
+
+    if let (Some(row), Some(height)) = (row, height) {
+        row_heights.insert(row, height);
+    }
+
+    Ok(())
 }
 
 fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
@@ -861,10 +993,16 @@ mod tests {
                 Worksheet {
                     name: "Empleados".to_string(),
                     cells: HashMap::new(),
+                    merged_cells: Vec::new(),
+                    column_widths: HashMap::new(),
+                    row_heights: HashMap::new(),
                 },
                 Worksheet {
                     name: "Productos".to_string(),
                     cells: HashMap::new(),
+                    merged_cells: Vec::new(),
+                    column_widths: HashMap::new(),
+                    row_heights: HashMap::new(),
                 },
             ],
             active_index: 1,

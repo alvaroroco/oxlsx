@@ -16,6 +16,7 @@ thiserror = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 tempfile = "3"
+indexmap = "2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

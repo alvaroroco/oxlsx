@@ -1,6 +1,7 @@
 use crate::styles::CellXf;
 use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
 use chrono::NaiveDate;
+use indexmap::IndexMap;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use std::collections::{HashMap, HashSet};
@@ -130,6 +131,43 @@ pub(crate) fn collect_styles(
         }
     }
 
+    for (sheet_idx, sheet) in sheets.iter().enumerate() {
+        for (reference, cell) in sheet.cells() {
+            if !matches!(cell.value(), Value::Date(_)) {
+                continue;
+            }
+
+            let style_key = (sheet_idx, reference.clone());
+            let existing_style_id = cell_style_ids
+                .get(&style_key)
+                .copied()
+                .unwrap_or(cell.style_id().as_usize() as u32);
+
+            let existing_xf = cell_xfs
+                .get(existing_style_id as usize)
+                .cloned()
+                .unwrap_or(CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 0,
+                });
+
+            if is_builtin_date_num_fmt(existing_xf.num_fmt_id) {
+                continue;
+            }
+
+            let style_id = find_or_push(
+                &mut cell_xfs,
+                CellXf {
+                    font_id: existing_xf.font_id,
+                    fill_id: existing_xf.fill_id,
+                    num_fmt_id: 14,
+                },
+            ) as u32;
+            cell_style_ids.insert(style_key, style_id);
+        }
+    }
+
     num_fmts.sort_by_key(|(id, _)| *id);
 
     CollectedStyles {
@@ -141,6 +179,21 @@ pub(crate) fn collect_styles(
     }
 }
 
+fn collect_shared_strings(sheets: &[Worksheet]) -> IndexMap<String, usize> {
+    let mut shared_strings = IndexMap::new();
+
+    for sheet in sheets {
+        for cell in sheet.cells().values() {
+            if let Value::String(text) = cell.value() {
+                let next_index = shared_strings.len();
+                shared_strings.entry(text.clone()).or_insert(next_index);
+            }
+        }
+    }
+
+    shared_strings
+}
+
 fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     if let Some(idx) = items.iter().position(|item| item == &value) {
         idx
@@ -148,6 +201,10 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
         items.push(value);
         items.len() - 1
     }
+}
+
+fn is_builtin_date_num_fmt(num_fmt_id: u32) -> bool {
+    (14..=17).contains(&num_fmt_id) || num_fmt_id == 22
 }
 
 pub fn write_xlsx(
@@ -177,11 +234,13 @@ fn write_xlsx_to_path(
     let options = SimpleFileOptions::default();
     let sheets = wb.worksheets();
     let preserve_original = source_path.is_some();
+    let shared_strings = collect_shared_strings(sheets);
+    let has_shared_strings = !shared_strings.is_empty();
     let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original);
     let mut written_entries = HashSet::new();
 
     if !preserve_original {
-        write_content_types(&mut zip, options, sheets.len())?;
+        write_content_types(&mut zip, options, sheets.len(), has_shared_strings)?;
         written_entries.insert("[Content_Types].xml".to_string());
         write_root_rels(&mut zip, options)?;
         written_entries.insert("_rels/.rels".to_string());
@@ -190,14 +249,26 @@ fn write_xlsx_to_path(
     write_workbook_xml(&mut zip, options, wb)?;
     written_entries.insert("xl/workbook.xml".to_string());
 
-    write_workbook_rels(&mut zip, options, sheets.len())?;
+    write_workbook_rels(&mut zip, options, sheets.len(), has_shared_strings)?;
     written_entries.insert("xl/_rels/workbook.xml.rels".to_string());
 
     write_styles_xml(&mut zip, options, &collected)?;
     written_entries.insert("xl/styles.xml".to_string());
 
+    if has_shared_strings {
+        write_shared_strings_xml(&mut zip, options, &shared_strings)?;
+        written_entries.insert("xl/sharedStrings.xml".to_string());
+    }
+
     for (idx, ws) in sheets.iter().enumerate() {
-        write_sheet_xml(&mut zip, options, ws, idx, &collected.cell_style_ids)?;
+        write_sheet_xml(
+            &mut zip,
+            options,
+            ws,
+            idx,
+            &collected.cell_style_ids,
+            &shared_strings,
+        )?;
         written_entries.insert(format!("xl/worksheets/sheet{}.xml", idx + 1));
     }
 
@@ -259,6 +330,7 @@ fn write_content_types(
     zip: &mut ZipWriter<File>,
     options: SimpleFileOptions,
     sheet_count: usize,
+    has_shared_strings: bool,
 ) -> Result<(), OxlsxError> {
     let mut xml = xml_writer_with_decl()?;
     write_start(
@@ -308,6 +380,19 @@ fn write_content_types(
             ),
         ],
     )?;
+    if has_shared_strings {
+        write_empty(
+            &mut xml,
+            "Override",
+            &[
+                ("PartName", "/xl/sharedStrings.xml"),
+                (
+                    "ContentType",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",
+                ),
+            ],
+        )?;
+    }
     for i in 1..=sheet_count {
         let part_name = format!("/xl/worksheets/sheet{i}.xml");
         write_empty(
@@ -404,6 +489,7 @@ fn write_workbook_rels(
     zip: &mut ZipWriter<File>,
     options: SimpleFileOptions,
     sheet_count: usize,
+    has_shared_strings: bool,
 ) -> Result<(), OxlsxError> {
     let mut xml = xml_writer_with_decl()?;
     write_start(
@@ -439,6 +525,21 @@ fn write_workbook_rels(
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet",
                 ),
                 ("Target", target.as_str()),
+            ],
+        )?;
+    }
+    if has_shared_strings {
+        let rid = format!("rId{}", sheet_count + 2);
+        write_empty(
+            &mut xml,
+            "Relationship",
+            &[
+                ("Id", rid.as_str()),
+                (
+                    "Type",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings",
+                ),
+                ("Target", "sharedStrings.xml"),
             ],
         )?;
     }
@@ -592,12 +693,45 @@ pub(crate) fn write_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), O
     write_end(xml, "fill")
 }
 
+fn write_shared_strings_xml(
+    zip: &mut ZipWriter<File>,
+    options: SimpleFileOptions,
+    shared_strings: &IndexMap<String, usize>,
+) -> Result<(), OxlsxError> {
+    let mut xml = xml_writer_with_decl()?;
+    let count = shared_strings.len().to_string();
+    write_start(
+        &mut xml,
+        "sst",
+        &[
+            (
+                "xmlns",
+                "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+            ),
+            ("count", count.as_str()),
+            ("uniqueCount", count.as_str()),
+        ],
+    )?;
+
+    for value in shared_strings.keys() {
+        write_start(&mut xml, "si", &[])?;
+        write_start(&mut xml, "t", &[])?;
+        xml.write_event(Event::Text(BytesText::new(value)))?;
+        write_end(&mut xml, "t")?;
+        write_end(&mut xml, "si")?;
+    }
+
+    write_end(&mut xml, "sst")?;
+    write_zip_entry(zip, options, "xl/sharedStrings.xml", xml.into_inner())
+}
+
 fn write_sheet_xml(
     zip: &mut ZipWriter<File>,
     options: SimpleFileOptions,
     ws: &Worksheet,
     sheet_idx: usize,
     style_ids: &HashMap<(usize, String), u32>,
+    shared_strings: &IndexMap<String, usize>,
 ) -> Result<(), OxlsxError> {
     let mut xml = xml_writer_with_decl()?;
     write_start(
@@ -608,6 +742,35 @@ fn write_sheet_xml(
             "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
         )],
     )?;
+
+    if !ws.column_widths.is_empty() {
+        write_start(&mut xml, "cols", &[])?;
+
+        let mut ordered_cols = ws
+            .column_widths
+            .iter()
+            .map(|(col, width)| (*col, *width))
+            .collect::<Vec<_>>();
+        ordered_cols.sort_by_key(|(col, _)| *col);
+
+        for (col, width) in ordered_cols {
+            let col_str = col.to_string();
+            let width_str = width.to_string();
+            write_empty(
+                &mut xml,
+                "col",
+                &[
+                    ("min", col_str.as_str()),
+                    ("max", col_str.as_str()),
+                    ("width", width_str.as_str()),
+                    ("customWidth", "1"),
+                ],
+            )?;
+        }
+
+        write_end(&mut xml, "cols")?;
+    }
+
     write_start(&mut xml, "sheetData", &[])?;
 
     let mut ordered_cells = ws
@@ -620,33 +783,69 @@ fn write_sheet_xml(
         .collect::<Vec<_>>();
     ordered_cells.sort_by_key(|(row, col, _, _)| (*row, *col));
 
-    let mut current_row: Option<u32> = None;
-    for (row, _, reference, cell) in ordered_cells {
+    let mut row_cells = HashMap::new();
+    for (row, col, reference, cell) in ordered_cells {
         if matches!(cell.value(), Value::Empty) {
             continue;
         }
 
-        if current_row != Some(row) {
-            if current_row.is_some() {
-                write_end(&mut xml, "row")?;
-            }
-            let row_attr = row.to_string();
-            write_start(&mut xml, "row", &[("r", row_attr.as_str())])?;
-            current_row = Some(row);
-        }
-
-        let style_id = style_ids
-            .get(&(sheet_idx, reference.to_string()))
-            .copied()
-            .unwrap_or(cell.style_id().as_usize() as u32);
-        write_cell(&mut xml, reference, style_id, cell.value())?;
+        row_cells
+            .entry(row)
+            .or_insert_with(Vec::new)
+            .push((col, reference, cell));
     }
 
-    if current_row.is_some() {
+    let mut rows_to_write = row_cells.keys().copied().collect::<Vec<_>>();
+    for row in ws.row_heights.keys() {
+        if !rows_to_write.contains(row) {
+            rows_to_write.push(*row);
+        }
+    }
+    rows_to_write.sort_unstable();
+
+    for row in rows_to_write {
+        let row_attr = row.to_string();
+        let height_value = ws.row_heights.get(&row).map(|height| height.to_string());
+
+        if let Some(height_value) = height_value.as_deref() {
+            write_start(
+                &mut xml,
+                "row",
+                &[
+                    ("r", row_attr.as_str()),
+                    ("ht", height_value),
+                    ("customHeight", "1"),
+                ],
+            )?;
+        } else {
+            write_start(&mut xml, "row", &[("r", row_attr.as_str())])?;
+        }
+
+        if let Some(cells) = row_cells.get_mut(&row) {
+            cells.sort_by_key(|(col, _, _)| *col);
+            for (_, reference, cell) in cells {
+                let style_id = style_ids
+                    .get(&(sheet_idx, (*reference).to_string()))
+                    .copied()
+                    .unwrap_or(cell.style_id().as_usize() as u32);
+                write_cell(&mut xml, reference, style_id, cell.value(), shared_strings)?;
+            }
+        }
+
         write_end(&mut xml, "row")?;
     }
 
     write_end(&mut xml, "sheetData")?;
+
+    if !ws.merged_cells.is_empty() {
+        let count = ws.merged_cells.len().to_string();
+        write_start(&mut xml, "mergeCells", &[("count", count.as_str())])?;
+        for range_ref in &ws.merged_cells {
+            write_empty(&mut xml, "mergeCell", &[("ref", range_ref.as_str())])?;
+        }
+        write_end(&mut xml, "mergeCells")?;
+    }
+
     write_end(&mut xml, "worksheet")?;
     let part = format!("xl/worksheets/sheet{}.xml", sheet_idx + 1);
     write_zip_entry(zip, options, part.as_str(), xml.into_inner())
@@ -657,19 +856,23 @@ fn write_cell(
     reference: &str,
     style_id: u32,
     value: &Value,
+    shared_strings: &IndexMap<String, usize>,
 ) -> Result<(), OxlsxError> {
     let style_str = style_id.to_string();
     let mut base = vec![("r", reference), ("s", style_str.as_str())];
 
     match value {
         Value::String(text) => {
-            base.push(("t", "inlineStr"));
+            let Some(index) = shared_strings.get(text) else {
+                return Ok(());
+            };
+            let index = index.to_string();
+
+            base.push(("t", "s"));
             write_start(xml, "c", &base)?;
-            write_start(xml, "is", &[])?;
-            write_start(xml, "t", &[])?;
-            xml.write_event(Event::Text(BytesText::new(text)))?;
-            write_end(xml, "t")?;
-            write_end(xml, "is")?;
+            write_start(xml, "v", &[])?;
+            xml.write_event(Event::Text(BytesText::new(index.as_str())))?;
+            write_end(xml, "v")?;
             write_end(xml, "c")?;
         }
         Value::Number(n) => {
@@ -695,6 +898,13 @@ fn write_cell(
             let value = date_to_excel_serial(*date).to_string();
             xml.write_event(Event::Text(BytesText::new(&value)))?;
             write_end(xml, "v")?;
+            write_end(xml, "c")?;
+        }
+        Value::Formula(formula) => {
+            write_start(xml, "c", &base)?;
+            write_start(xml, "f", &[])?;
+            xml.write_event(Event::Text(BytesText::new(formula)))?;
+            write_end(xml, "f")?;
             write_end(xml, "c")?;
         }
         Value::Empty => {}
@@ -865,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn write_xlsx_writes_required_ooxml_parts_and_escapes_inline_strings() {
+    fn write_xlsx_writes_required_ooxml_parts_and_escapes_shared_strings() {
         let path = temp_path("oxlsx_writer_parts");
         let mut wb = Workbook::new();
         wb.active_mut().unwrap().set_cell("A1", "A&B<Z>");
@@ -882,6 +1092,7 @@ mod tests {
             "xl/workbook.xml",
             "xl/_rels/workbook.xml.rels",
             "xl/styles.xml",
+            "xl/sharedStrings.xml",
             "xl/worksheets/sheet1.xml",
             "xl/worksheets/sheet2.xml",
         ];
@@ -889,12 +1100,12 @@ mod tests {
             assert!(zip.by_name(part).is_ok(), "missing part: {part}");
         }
 
-        let mut sheet1_xml = String::new();
-        zip.by_name("xl/worksheets/sheet1.xml")
+        let mut shared_strings_xml = String::new();
+        zip.by_name("xl/sharedStrings.xml")
             .unwrap()
-            .read_to_string(&mut sheet1_xml)
+            .read_to_string(&mut shared_strings_xml)
             .unwrap();
-        assert!(sheet1_xml.contains("A&amp;B&lt;Z&gt;"));
+        assert!(shared_strings_xml.contains("A&amp;B&lt;Z&gt;"));
 
         fs::remove_file(path).ok();
     }
