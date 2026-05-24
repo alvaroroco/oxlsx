@@ -192,6 +192,7 @@ pub struct Workbook {
     sheets: Vec<Worksheet>,
     active_index: usize,
     pub(crate) source_path: Option<PathBuf>,
+    pub(crate) original_styles: Option<Arc<StyleSheet>>,
 }
 
 impl Workbook {
@@ -200,6 +201,7 @@ impl Workbook {
             sheets: vec![Worksheet::new("Sheet")],
             active_index: 0,
             source_path: None,
+            original_styles: None,
         }
     }
 
@@ -266,6 +268,7 @@ impl Workbook {
             sheets,
             active_index,
             source_path: Some(source_path),
+            original_styles: Some(styles),
         })
     }
 
@@ -866,6 +869,7 @@ mod tests {
             ],
             active_index: 1,
             source_path: None,
+            original_styles: None,
         };
 
         assert_eq!(wb.sheet(0).unwrap().title(), "Empleados");

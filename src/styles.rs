@@ -289,6 +289,13 @@ impl StyleSheet {
             _ => false,
         }
     }
+
+    pub(crate) fn num_fmts_vec(&self) -> Vec<(u32, String)> {
+        self.num_fmts
+            .iter()
+            .map(|(num_fmt_id, format_code)| (*num_fmt_id, format_code.clone()))
+            .collect()
+    }
 }
 
 fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxError> {

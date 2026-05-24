@@ -1,18 +1,22 @@
-use crate::{Color, Fill, Font, OxlsxError, Value, Workbook, Worksheet};
+use crate::styles::CellXf;
+use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
 use chrono::NaiveDate;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use tempfile::NamedTempFile;
+use zip::ZipArchive;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 pub(crate) struct CollectedStyles {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
-    pub cell_xfs: Vec<(u32, u32)>,
+    pub cell_xfs: Vec<CellXf>,
+    pub num_fmts: Vec<(u32, String)>,
     pub cell_style_ids: HashMap<(usize, String), u32>,
 }
 
@@ -34,45 +38,106 @@ pub(crate) fn cell_sort_key(reference: &str) -> (u32, u32) {
     (row, col)
 }
 
-pub(crate) fn collect_styles(sheets: &[Worksheet]) -> CollectedStyles {
+pub(crate) fn collect_styles(
+    sheets: &[Worksheet],
+    original: Option<&StyleSheet>,
+    preserve_original: bool,
+) -> CollectedStyles {
     let styled_cells = sheets
         .iter()
         .map(|sheet| sheet.cells().len())
         .sum::<usize>();
 
-    let mut fonts = Vec::with_capacity(1 + styled_cells);
-    fonts.push(Font::default());
+    let (mut fonts, mut fills, mut cell_xfs, mut num_fmts) =
+        if preserve_original && original.is_some() {
+            let source = original.expect("checked is_some above");
+            (
+                source.fonts.clone(),
+                source.fills.clone(),
+                source.cell_xfs.clone(),
+                source.num_fmts_vec(),
+            )
+        } else {
+            (
+                vec![Font::default()],
+                vec![Fill::none(), Fill::gray125()],
+                vec![CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 0,
+                }],
+                Vec::new(),
+            )
+        };
 
-    let mut fills = Vec::with_capacity(2 + styled_cells);
-    fills.push(Fill::none());
-    fills.push(Fill::gray125());
-
-    let mut cell_xfs = Vec::with_capacity(1 + styled_cells);
-    cell_xfs.push((0_u32, 0_u32));
+    if fonts.capacity() < fonts.len() + styled_cells {
+        fonts.reserve(styled_cells);
+    }
+    if fills.capacity() < fills.len() + styled_cells {
+        fills.reserve(styled_cells);
+    }
+    if cell_xfs.capacity() < cell_xfs.len() + styled_cells {
+        cell_xfs.reserve(styled_cells);
+    }
 
     let mut cell_style_ids = HashMap::with_capacity(styled_cells);
 
     for (sheet_idx, sheet) in sheets.iter().enumerate() {
         for (reference, cell) in sheet.cells() {
+            if preserve_original && cell.write_font.is_none() && cell.write_fill.is_none() {
+                continue;
+            }
+
             if cell.write_font.is_none() && cell.write_fill.is_none() {
                 continue;
             }
 
-            let font = cell.write_font.clone().unwrap_or_default();
-            let fill = cell.write_fill.clone().unwrap_or_else(Fill::none);
+            let base_xf = cell_xfs
+                .get(cell.style_id().as_usize())
+                .cloned()
+                .unwrap_or(CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 0,
+                });
+
+            let font = match &cell.write_font {
+                Some(font) => font.clone(),
+                None => fonts
+                    .get(base_xf.font_id as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let fill = match &cell.write_fill {
+                Some(fill) => fill.clone(),
+                None => fills
+                    .get(base_xf.fill_id as usize)
+                    .cloned()
+                    .unwrap_or_else(Fill::none),
+            };
 
             let font_idx = find_or_push(&mut fonts, font) as u32;
             let fill_idx = find_or_push(&mut fills, fill) as u32;
-            let style_id = find_or_push(&mut cell_xfs, (font_idx, fill_idx)) as u32;
+            let style_id = find_or_push(
+                &mut cell_xfs,
+                CellXf {
+                    font_id: font_idx,
+                    fill_id: fill_idx,
+                    num_fmt_id: base_xf.num_fmt_id,
+                },
+            ) as u32;
 
             cell_style_ids.insert((sheet_idx, reference.clone()), style_id);
         }
     }
 
+    num_fmts.sort_by_key(|(id, _)| *id);
+
     CollectedStyles {
         fonts,
         fills,
         cell_xfs,
+        num_fmts,
         cell_style_ids,
     }
 }
@@ -91,25 +156,104 @@ pub fn write_xlsx(
     path: &Path,
     source_path: Option<&Path>,
 ) -> Result<(), OxlsxError> {
-    let _ = source_path;
+    if source_path.is_some_and(|source| source == path) {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let temp = NamedTempFile::new_in(parent)?;
+        write_xlsx_to_path(wb, temp.path(), source_path)?;
+        temp.persist(path)
+            .map_err(|err| OxlsxError::Io(err.error))?;
+        return Ok(());
+    }
+
+    write_xlsx_to_path(wb, path, source_path)
+}
+
+fn write_xlsx_to_path(
+    wb: &Workbook,
+    path: &Path,
+    source_path: Option<&Path>,
+) -> Result<(), OxlsxError> {
     let file = File::create(path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default();
     let sheets = wb.worksheets();
-    let collected = collect_styles(sheets);
+    let preserve_original = source_path.is_some();
+    let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original);
+    let mut written_entries = HashSet::new();
 
-    write_content_types(&mut zip, options, sheets.len())?;
-    write_root_rels(&mut zip, options)?;
+    if !preserve_original {
+        write_content_types(&mut zip, options, sheets.len())?;
+        written_entries.insert("[Content_Types].xml".to_string());
+        write_root_rels(&mut zip, options)?;
+        written_entries.insert("_rels/.rels".to_string());
+    }
+
     write_workbook_xml(&mut zip, options, wb)?;
+    written_entries.insert("xl/workbook.xml".to_string());
+
     write_workbook_rels(&mut zip, options, sheets.len())?;
+    written_entries.insert("xl/_rels/workbook.xml.rels".to_string());
+
     write_styles_xml(&mut zip, options, &collected)?;
+    written_entries.insert("xl/styles.xml".to_string());
 
     for (idx, ws) in sheets.iter().enumerate() {
         write_sheet_xml(&mut zip, options, ws, idx, &collected.cell_style_ids)?;
+        written_entries.insert(format!("xl/worksheets/sheet{}.xml", idx + 1));
+    }
+
+    if let Some(source) = source_path {
+        copy_unknown_entries(
+            &mut zip,
+            source,
+            &written_entries,
+            sheets.len(),
+            preserve_original,
+        )?;
     }
 
     zip.finish()?;
     Ok(())
+}
+
+fn copy_unknown_entries(
+    zip: &mut ZipWriter<File>,
+    source: &Path,
+    written_entries: &HashSet<String>,
+    sheet_count: usize,
+    preserve_original: bool,
+) -> Result<(), OxlsxError> {
+    let source_file = File::open(source)?;
+    let mut archive = ZipArchive::new(source_file)?;
+
+    for index in 0..archive.len() {
+        let source_entry = archive.by_index(index)?;
+        let name = source_entry.name().to_string();
+        if written_entries.contains(&name)
+            || is_writer_owned_entry(&name, sheet_count, preserve_original)
+        {
+            continue;
+        }
+        zip.raw_copy_file(source_entry)?;
+    }
+
+    Ok(())
+}
+
+fn is_writer_owned_entry(name: &str, sheet_count: usize, preserve_original: bool) -> bool {
+    if !preserve_original && (name == "[Content_Types].xml" || name == "_rels/.rels") {
+        return true;
+    }
+
+    if name == "xl/workbook.xml"
+        || name == "xl/_rels/workbook.xml.rels"
+        || name == "xl/styles.xml"
+        || name == "xl/sharedStrings.xml"
+    {
+        return true;
+    }
+
+    (1..=sheet_count).any(|sheet_idx| name == format!("xl/worksheets/sheet{sheet_idx}.xml"))
 }
 
 fn write_content_types(
@@ -318,6 +462,23 @@ fn write_styles_xml(
         )],
     )?;
 
+    if !collected.num_fmts.is_empty() {
+        let count = collected.num_fmts.len().to_string();
+        write_start(&mut xml, "numFmts", &[("count", count.as_str())])?;
+        for (num_fmt_id, code) in &collected.num_fmts {
+            let num_fmt_id = num_fmt_id.to_string();
+            write_empty(
+                &mut xml,
+                "numFmt",
+                &[
+                    ("numFmtId", num_fmt_id.as_str()),
+                    ("formatCode", code.as_str()),
+                ],
+            )?;
+        }
+        write_end(&mut xml, "numFmts")?;
+    }
+
     let font_count = collected.fonts.len().to_string();
     write_start(&mut xml, "fonts", &[("count", font_count.as_str())])?;
     for font in &collected.fonts {
@@ -357,14 +518,15 @@ fn write_styles_xml(
 
     let xf_count = collected.cell_xfs.len().to_string();
     write_start(&mut xml, "cellXfs", &[("count", xf_count.as_str())])?;
-    for (font_id, fill_id) in &collected.cell_xfs {
-        let font_id_str = font_id.to_string();
-        let fill_id_str = fill_id.to_string();
+    for xf in &collected.cell_xfs {
+        let font_id_str = xf.font_id.to_string();
+        let fill_id_str = xf.fill_id.to_string();
+        let num_fmt_id_str = xf.num_fmt_id.to_string();
         write_empty(
             &mut xml,
             "xf",
             &[
-                ("numFmtId", "0"),
+                ("numFmtId", num_fmt_id_str.as_str()),
                 ("fontId", font_id_str.as_str()),
                 ("fillId", fill_id_str.as_str()),
                 ("borderId", "0"),
@@ -477,7 +639,7 @@ fn write_sheet_xml(
         let style_id = style_ids
             .get(&(sheet_idx, reference.to_string()))
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(cell.style_id().as_usize() as u32);
         write_cell(&mut xml, reference, style_id, cell.value())?;
     }
 
@@ -615,10 +777,11 @@ fn write_end(xml: &mut Writer<Vec<u8>>, name: &str) -> Result<(), OxlsxError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Fill, Font, Workbook, Worksheet};
+    use crate::{Fill, Font, StyleSheet, Workbook, Worksheet};
     use std::env;
     use std::fs;
     use std::io::Read;
+    use std::io::{BufReader, Cursor};
     use std::time::{SystemTime, UNIX_EPOCH};
     use zip::ZipArchive;
 
@@ -643,7 +806,7 @@ mod tests {
         let mut ws = Worksheet::new("Sheet");
         ws.set_cell("A1", "Hello");
 
-        let collected = super::collect_styles(&[ws]);
+        let collected = super::collect_styles(&[ws], None, false);
 
         assert_eq!(collected.fonts.len(), 1);
         assert_eq!(collected.fills.len(), 2);
@@ -677,7 +840,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws]);
+        let collected = super::collect_styles(&[ws], None, false);
 
         assert_eq!(collected.fonts.len(), 2);
         assert_eq!(collected.fills.len(), 2);
@@ -697,7 +860,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws]);
+        let collected = super::collect_styles(&[ws], None, false);
 
         assert_eq!(collected.fills.len(), 3);
     }
@@ -779,6 +942,112 @@ mod tests {
         super::write_xlsx(&wb, &path, None).unwrap();
 
         assert!(path.exists());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_copies_unknown_entries_from_source_archive() {
+        let path = temp_path("oxlsx_writer_copy_unknown");
+        let wb = Workbook::open("samples/test.xlsx").unwrap();
+
+        super::write_xlsx(&wb, &path, Some(std::path::Path::new("samples/test.xlsx"))).unwrap();
+
+        let file = fs::File::open(&path).unwrap();
+        let mut zip = ZipArchive::new(file).unwrap();
+
+        assert!(zip.by_name("xl/theme/theme1.xml").is_ok());
+        assert!(zip.by_name("docProps/app.xml").is_ok());
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_preserves_original_content_types_and_root_rels_when_source_present() {
+        let path = temp_path("oxlsx_writer_preserve_root_parts");
+        let wb = Workbook::open("samples/test.xlsx").unwrap();
+
+        super::write_xlsx(&wb, &path, Some(std::path::Path::new("samples/test.xlsx"))).unwrap();
+
+        let source_file = fs::File::open("samples/test.xlsx").unwrap();
+        let mut source_zip = ZipArchive::new(source_file).unwrap();
+        let mut source_content_types = Vec::new();
+        source_zip
+            .by_name("[Content_Types].xml")
+            .unwrap()
+            .read_to_end(&mut source_content_types)
+            .unwrap();
+        let mut source_root_rels = Vec::new();
+        source_zip
+            .by_name("_rels/.rels")
+            .unwrap()
+            .read_to_end(&mut source_root_rels)
+            .unwrap();
+
+        let output_file = fs::File::open(&path).unwrap();
+        let mut output_zip = ZipArchive::new(output_file).unwrap();
+        let mut output_content_types = Vec::new();
+        output_zip
+            .by_name("[Content_Types].xml")
+            .unwrap()
+            .read_to_end(&mut output_content_types)
+            .unwrap();
+        let mut output_root_rels = Vec::new();
+        output_zip
+            .by_name("_rels/.rels")
+            .unwrap()
+            .read_to_end(&mut output_root_rels)
+            .unwrap();
+
+        assert_eq!(output_content_types, source_content_types);
+        assert_eq!(output_root_rels, source_root_rels);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_preserves_source_styles_and_appends_new_xf() {
+        let path = temp_path("oxlsx_writer_preserve_styles");
+        let mut wb = Workbook::open("samples/test.xlsx").unwrap();
+        let ws = wb.active_mut().unwrap();
+        ws.set_cell("C1", 99.0_f64);
+        ws.set_cell_font(
+            "C1",
+            Font {
+                italic: true,
+                ..Default::default()
+            },
+        );
+
+        super::write_xlsx(&wb, &path, Some(std::path::Path::new("samples/test.xlsx"))).unwrap();
+
+        let source_file = fs::File::open("samples/test.xlsx").unwrap();
+        let mut source_zip = ZipArchive::new(source_file).unwrap();
+        let mut source_styles_bytes = Vec::new();
+        source_zip
+            .by_name("xl/styles.xml")
+            .unwrap()
+            .read_to_end(&mut source_styles_bytes)
+            .unwrap();
+        let source_styles =
+            StyleSheet::parse(BufReader::new(Cursor::new(source_styles_bytes))).unwrap();
+
+        let output_file = fs::File::open(&path).unwrap();
+        let mut output_zip = ZipArchive::new(output_file).unwrap();
+        let mut output_styles_bytes = Vec::new();
+        output_zip
+            .by_name("xl/styles.xml")
+            .unwrap()
+            .read_to_end(&mut output_styles_bytes)
+            .unwrap();
+        let output_styles =
+            StyleSheet::parse(BufReader::new(Cursor::new(output_styles_bytes))).unwrap();
+
+        assert!(output_styles.cell_xfs.len() > source_styles.cell_xfs.len());
+        assert_eq!(
+            &output_styles.cell_xfs[..source_styles.cell_xfs.len()],
+            &source_styles.cell_xfs[..]
+        );
+
         fs::remove_file(path).ok();
     }
 }
