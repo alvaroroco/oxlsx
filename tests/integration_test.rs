@@ -2,9 +2,22 @@ use chrono::NaiveDate;
 use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
 use std::env;
 use std::fs;
+use std::io::Read;
+use zip::ZipArchive;
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     env::temp_dir().join(name)
+}
+
+fn read_zip_entry(path: &std::path::Path, entry: &str) -> String {
+    let file = fs::File::open(path).unwrap();
+    let mut zip = ZipArchive::new(file).unwrap();
+    let mut xml = String::new();
+    zip.by_name(entry)
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    xml
 }
 
 #[test]
@@ -409,6 +422,61 @@ fn write_date_with_num_fmt() {
         wb2.sheet(0).unwrap().cell("A1").unwrap().value(),
         &Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
     );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_column_width() {
+    let path = temp_path("oxlsx_write_column_width.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().column_width(1, 20.0);
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet_xml.contains("customWidth=\"1\""));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_row_height() {
+    let path = temp_path("oxlsx_write_row_height.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("A1", "x");
+    wb.active_mut().unwrap().row_height(1, 30.0);
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet_xml.contains("customHeight=\"1\""));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_merge_cells() {
+    let path = temp_path("oxlsx_write_merge_cells.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().merge_cells("A1:C1");
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet_xml.contains("<mergeCell ref=\"A1:C1\"/>"));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_unmerge_cells() {
+    let path = temp_path("oxlsx_write_unmerge_cells.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.merge_cells("A1:C1");
+    ws.unmerge_cells("A1:C1");
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(!sheet_xml.contains("mergeCell"));
 
     fs::remove_file(path).ok();
 }

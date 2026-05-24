@@ -649,6 +649,35 @@ fn write_sheet_xml(
             "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
         )],
     )?;
+
+    if !ws.column_widths.is_empty() {
+        write_start(&mut xml, "cols", &[])?;
+
+        let mut ordered_cols = ws
+            .column_widths
+            .iter()
+            .map(|(col, width)| (*col, *width))
+            .collect::<Vec<_>>();
+        ordered_cols.sort_by_key(|(col, _)| *col);
+
+        for (col, width) in ordered_cols {
+            let col_str = col.to_string();
+            let width_str = width.to_string();
+            write_empty(
+                &mut xml,
+                "col",
+                &[
+                    ("min", col_str.as_str()),
+                    ("max", col_str.as_str()),
+                    ("width", width_str.as_str()),
+                    ("customWidth", "1"),
+                ],
+            )?;
+        }
+
+        write_end(&mut xml, "cols")?;
+    }
+
     write_start(&mut xml, "sheetData", &[])?;
 
     let mut ordered_cells = ws
@@ -661,33 +690,69 @@ fn write_sheet_xml(
         .collect::<Vec<_>>();
     ordered_cells.sort_by_key(|(row, col, _, _)| (*row, *col));
 
-    let mut current_row: Option<u32> = None;
-    for (row, _, reference, cell) in ordered_cells {
+    let mut row_cells = HashMap::new();
+    for (row, col, reference, cell) in ordered_cells {
         if matches!(cell.value(), Value::Empty) {
             continue;
         }
 
-        if current_row != Some(row) {
-            if current_row.is_some() {
-                write_end(&mut xml, "row")?;
-            }
-            let row_attr = row.to_string();
-            write_start(&mut xml, "row", &[("r", row_attr.as_str())])?;
-            current_row = Some(row);
-        }
-
-        let style_id = style_ids
-            .get(&(sheet_idx, reference.to_string()))
-            .copied()
-            .unwrap_or(cell.style_id().as_usize() as u32);
-        write_cell(&mut xml, reference, style_id, cell.value())?;
+        row_cells
+            .entry(row)
+            .or_insert_with(Vec::new)
+            .push((col, reference, cell));
     }
 
-    if current_row.is_some() {
+    let mut rows_to_write = row_cells.keys().copied().collect::<Vec<_>>();
+    for row in ws.row_heights.keys() {
+        if !rows_to_write.contains(row) {
+            rows_to_write.push(*row);
+        }
+    }
+    rows_to_write.sort_unstable();
+
+    for row in rows_to_write {
+        let row_attr = row.to_string();
+        let height_value = ws.row_heights.get(&row).map(|height| height.to_string());
+
+        if let Some(height_value) = height_value.as_deref() {
+            write_start(
+                &mut xml,
+                "row",
+                &[
+                    ("r", row_attr.as_str()),
+                    ("ht", height_value),
+                    ("customHeight", "1"),
+                ],
+            )?;
+        } else {
+            write_start(&mut xml, "row", &[("r", row_attr.as_str())])?;
+        }
+
+        if let Some(cells) = row_cells.get_mut(&row) {
+            cells.sort_by_key(|(col, _, _)| *col);
+            for (_, reference, cell) in cells {
+                let style_id = style_ids
+                    .get(&(sheet_idx, (*reference).to_string()))
+                    .copied()
+                    .unwrap_or(cell.style_id().as_usize() as u32);
+                write_cell(&mut xml, reference, style_id, cell.value())?;
+            }
+        }
+
         write_end(&mut xml, "row")?;
     }
 
     write_end(&mut xml, "sheetData")?;
+
+    if !ws.merged_cells.is_empty() {
+        let count = ws.merged_cells.len().to_string();
+        write_start(&mut xml, "mergeCells", &[("count", count.as_str())])?;
+        for range_ref in &ws.merged_cells {
+            write_empty(&mut xml, "mergeCell", &[("ref", range_ref.as_str())])?;
+        }
+        write_end(&mut xml, "mergeCells")?;
+    }
+
     write_end(&mut xml, "worksheet")?;
     let part = format!("xl/worksheets/sheet{}.xml", sheet_idx + 1);
     write_zip_entry(zip, options, part.as_str(), xml.into_inner())
