@@ -49,8 +49,7 @@ pub(crate) fn collect_styles(
         .sum::<usize>();
 
     let (mut fonts, mut fills, mut cell_xfs, mut num_fmts) =
-        if preserve_original && original.is_some() {
-            let source = original.expect("checked is_some above");
+        if preserve_original && let Some(source) = original {
             (
                 source.fonts.clone(),
                 source.fills.clone(),
