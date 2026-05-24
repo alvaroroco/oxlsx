@@ -1,4 +1,4 @@
-use crate::coords::{parse_a1, rc_to_a1};
+use crate::coords::{parse_a1, parse_range, rc_to_a1, shift_a1, shift_range};
 use crate::workbook_rels::parse_sheet_refs;
 use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
@@ -20,6 +20,12 @@ pub enum Value {
     Bool(bool),
     Date(NaiveDate),
     Formula(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Row {
+    Ordered(Vec<Value>),
+    Sparse(Vec<(u32, Value)>),
 }
 
 impl From<&str> for Value {
@@ -211,6 +217,310 @@ impl Worksheet {
 
     pub fn row_height(&mut self, row: u32, height: f64) {
         self.row_heights.insert(row, height);
+    }
+
+    pub fn append(&mut self, row: Row) {
+        let target_row = self.used_bounds().map_or(1, |(_, _, _, max_row)| max_row + 1);
+
+        match row {
+            Row::Ordered(values) => {
+                for (index, value) in values.into_iter().enumerate() {
+                    if value == Value::Empty {
+                        continue;
+                    }
+
+                    let Some(col) = u32::try_from(index + 1).ok() else {
+                        continue;
+                    };
+                    let reference = rc_to_a1(target_row, col);
+                    self.set_cell(&reference, value);
+                }
+            }
+            Row::Sparse(entries) => {
+                for (col, value) in entries {
+                    if col == 0 || value == Value::Empty {
+                        continue;
+                    }
+
+                    let reference = rc_to_a1(target_row, col);
+                    self.set_cell(&reference, value);
+                }
+            }
+        }
+    }
+
+    pub fn insert_rows(&mut self, idx: u32, amount: u32) {
+        if idx == 0 || amount == 0 {
+            return;
+        }
+
+        self.rebuild_cells(|row, col| {
+            if row >= idx {
+                Some((row + amount, col))
+            } else {
+                Some((row, col))
+            }
+        });
+
+        self.shift_row_heights_insert(idx, amount);
+        self.shift_merged_rows_insert(idx, amount);
+    }
+
+    pub fn delete_rows(&mut self, idx: u32, amount: u32) {
+        if idx == 0 || amount == 0 {
+            return;
+        }
+
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+        self.rebuild_cells(|row, col| {
+            if row < idx {
+                Some((row, col))
+            } else if row > delete_end {
+                Some((row - amount, col))
+            } else {
+                None
+            }
+        });
+
+        self.shift_row_heights_delete(idx, amount);
+        self.shift_merged_rows_delete(idx, amount);
+    }
+
+    pub fn insert_cols(&mut self, idx: u32, amount: u32) {
+        if idx == 0 || amount == 0 {
+            return;
+        }
+
+        self.rebuild_cells(|row, col| {
+            if col >= idx {
+                Some((row, col + amount))
+            } else {
+                Some((row, col))
+            }
+        });
+
+        self.shift_column_widths_insert(idx, amount);
+        self.shift_merged_cols_insert(idx, amount);
+    }
+
+    pub fn delete_cols(&mut self, idx: u32, amount: u32) {
+        if idx == 0 || amount == 0 {
+            return;
+        }
+
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+        self.rebuild_cells(|row, col| {
+            if col < idx {
+                Some((row, col))
+            } else if col > delete_end {
+                Some((row, col - amount))
+            } else {
+                None
+            }
+        });
+
+        self.shift_column_widths_delete(idx, amount);
+        self.shift_merged_cols_delete(idx, amount);
+    }
+
+    pub fn move_range(&mut self, range: &str, rows: i32, cols: i32) {
+        if rows == 0 && cols == 0 {
+            return;
+        }
+
+        let Some(((min_row, min_col), (max_row, max_col))) = parse_range(range) else {
+            return;
+        };
+
+        let moved_cells = self
+            .cells
+            .iter()
+            .filter_map(|(reference, cell)| {
+                let (row, col) = parse_a1(reference)?;
+                if row < min_row || row > max_row || col < min_col || col > max_col {
+                    return None;
+                }
+
+                let destination_ref = shift_a1(reference, rows, cols)?;
+                Some((reference.clone(), destination_ref, cell.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        if moved_cells.is_empty() {
+            return;
+        }
+
+        let source_refs = moved_cells
+            .iter()
+            .map(|(source, _, _)| source.clone())
+            .collect::<Vec<_>>();
+        let destination_refs = moved_cells
+            .iter()
+            .map(|(_, destination, _)| destination.clone())
+            .collect::<Vec<_>>();
+
+        for reference in source_refs.iter().chain(destination_refs.iter()) {
+            self.cells.remove(reference);
+        }
+
+        for (_, destination_ref, mut cell) in moved_cells {
+            cell.reference = destination_ref.clone();
+            self.cells.insert(destination_ref, cell);
+        }
+
+        if let Some(shifted) = shift_range(range, rows, cols) {
+            self.shift_merged_for_move(range, &shifted);
+        }
+    }
+
+    fn rebuild_cells<F>(&mut self, mut remap: F)
+    where
+        F: FnMut(u32, u32) -> Option<(u32, u32)>,
+    {
+        let mut rebuilt = HashMap::with_capacity(self.cells.len());
+        for (reference, mut cell) in mem::take(&mut self.cells) {
+            let Some((row, col)) = parse_a1(&reference) else {
+                continue;
+            };
+            let Some((new_row, new_col)) = remap(row, col) else {
+                continue;
+            };
+            let new_ref = rc_to_a1(new_row, new_col);
+            cell.reference = new_ref.clone();
+            rebuilt.insert(new_ref, cell);
+        }
+        self.cells = rebuilt;
+    }
+
+    fn shift_row_heights_insert(&mut self, idx: u32, amount: u32) {
+        let mut shifted = HashMap::with_capacity(self.row_heights.len());
+        for (row, height) in mem::take(&mut self.row_heights) {
+            let key = if row >= idx { row + amount } else { row };
+            shifted.insert(key, height);
+        }
+        self.row_heights = shifted;
+    }
+
+    fn shift_row_heights_delete(&mut self, idx: u32, amount: u32) {
+        let mut shifted = HashMap::with_capacity(self.row_heights.len());
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+        for (row, height) in mem::take(&mut self.row_heights) {
+            if row < idx {
+                shifted.insert(row, height);
+            } else if row > delete_end {
+                shifted.insert(row - amount, height);
+            }
+        }
+        self.row_heights = shifted;
+    }
+
+    fn shift_column_widths_insert(&mut self, idx: u32, amount: u32) {
+        let mut shifted = HashMap::with_capacity(self.column_widths.len());
+        for (col, width) in mem::take(&mut self.column_widths) {
+            let key = if col >= idx { col + amount } else { col };
+            shifted.insert(key, width);
+        }
+        self.column_widths = shifted;
+    }
+
+    fn shift_column_widths_delete(&mut self, idx: u32, amount: u32) {
+        let mut shifted = HashMap::with_capacity(self.column_widths.len());
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+        for (col, width) in mem::take(&mut self.column_widths) {
+            if col < idx {
+                shifted.insert(col, width);
+            } else if col > delete_end {
+                shifted.insert(col - amount, width);
+            }
+        }
+        self.column_widths = shifted;
+    }
+
+    fn shift_merged_rows_insert(&mut self, idx: u32, amount: u32) {
+        let mut shifted = Vec::with_capacity(self.merged_cells.len());
+        for range in mem::take(&mut self.merged_cells) {
+            if let Some(((start_row, _), _)) = parse_range(&range)
+                && start_row >= idx
+                && let Some(new_range) = shift_range(&range, amount as i32, 0)
+            {
+                shifted.push(new_range);
+            } else {
+                shifted.push(range);
+            }
+        }
+        self.merged_cells = shifted;
+    }
+
+    fn shift_merged_rows_delete(&mut self, idx: u32, amount: u32) {
+        let mut shifted = Vec::with_capacity(self.merged_cells.len());
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+
+        for range in mem::take(&mut self.merged_cells) {
+            let Some(((start_row, _), (end_row, _))) = parse_range(&range) else {
+                continue;
+            };
+
+            if end_row < idx {
+                shifted.push(range);
+            } else if start_row > delete_end {
+                if let Some(new_range) = shift_range(&range, -(amount as i32), 0) {
+                    shifted.push(new_range);
+                }
+            } else if start_row >= idx && end_row <= delete_end {
+                continue;
+            } else {
+                continue;
+            }
+        }
+
+        self.merged_cells = shifted;
+    }
+
+    fn shift_merged_cols_insert(&mut self, idx: u32, amount: u32) {
+        let mut shifted = Vec::with_capacity(self.merged_cells.len());
+        for range in mem::take(&mut self.merged_cells) {
+            if let Some(((_, start_col), _)) = parse_range(&range)
+                && start_col >= idx
+                && let Some(new_range) = shift_range(&range, 0, amount as i32)
+            {
+                shifted.push(new_range);
+            } else {
+                shifted.push(range);
+            }
+        }
+        self.merged_cells = shifted;
+    }
+
+    fn shift_merged_cols_delete(&mut self, idx: u32, amount: u32) {
+        let mut shifted = Vec::with_capacity(self.merged_cells.len());
+        let delete_end = idx.saturating_add(amount.saturating_sub(1));
+
+        for range in mem::take(&mut self.merged_cells) {
+            let Some(((_, start_col), (_, end_col))) = parse_range(&range) else {
+                continue;
+            };
+
+            if end_col < idx {
+                shifted.push(range);
+            } else if start_col > delete_end {
+                if let Some(new_range) = shift_range(&range, 0, -(amount as i32)) {
+                    shifted.push(new_range);
+                }
+            } else if start_col >= idx && end_col <= delete_end {
+                continue;
+            } else {
+                continue;
+            }
+        }
+
+        self.merged_cells = shifted;
+    }
+
+    fn shift_merged_for_move(&mut self, source_range: &str, shifted_range: &str) {
+        self.merged_cells.retain(|range| range != source_range);
+        if !self.merged_cells.iter().any(|range| range == shifted_range) {
+            self.merged_cells.push(shifted_range.to_string());
+        }
     }
 
     pub fn max_row(&self) -> u32 {

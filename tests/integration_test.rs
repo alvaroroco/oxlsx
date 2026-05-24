@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
+use oxlsx::{Color, Fill, Font, Row, StyleId, Value, Workbook};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -367,6 +367,186 @@ fn rmw_multi_sheet_modify() {
         wb2.sheet(1).unwrap().cell("A1").unwrap().value(),
         &Value::String("Laptop".to_string())
     );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn append_row_list() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.append(Row::Ordered(vec![
+        Value::String("A".to_string()),
+        Value::String("B".to_string()),
+        Value::Number(42.0),
+    ]));
+
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("A".to_string()));
+    assert_eq!(ws.cell("B1").unwrap().value(), &Value::String("B".to_string()));
+    assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
+}
+
+#[test]
+fn append_row_dict_letters() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.append(Row::Sparse(vec![
+        (1, Value::String("left".to_string())),
+        (3, Value::String("right".to_string())),
+    ]));
+
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("left".to_string()));
+    assert!(ws.cell("B1").is_none());
+    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("right".to_string()));
+}
+
+#[test]
+fn append_row_dict_indices() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.append(Row::Sparse(vec![(1, Value::String("x".to_string())), (3, Value::String("y".to_string()))]));
+
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("x".to_string()));
+    assert!(ws.cell("B1").is_none());
+    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("y".to_string()));
+}
+
+#[test]
+fn insert_rows_shifts_data() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "top");
+    ws.set_cell("A2", "bottom");
+
+    ws.insert_rows(1, 2);
+
+    assert!(ws.cell("A1").is_none());
+    assert_eq!(ws.cell("A3").unwrap().value(), &Value::String("top".to_string()));
+    assert_eq!(ws.cell("A4").unwrap().value(), &Value::String("bottom".to_string()));
+}
+
+#[test]
+fn delete_rows_removes_data() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "r1");
+    ws.set_cell("A2", "r2");
+    ws.set_cell("A3", "r3");
+
+    ws.delete_rows(2, 1);
+
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("r1".to_string()));
+    assert_eq!(ws.cell("A2").unwrap().value(), &Value::String("r3".to_string()));
+    assert!(ws.cell("A3").is_none());
+}
+
+#[test]
+fn insert_cols_shifts_data() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "left");
+    ws.set_cell("B1", "right");
+
+    ws.insert_cols(1, 2);
+
+    assert!(ws.cell("A1").is_none());
+    assert_eq!(ws.cell("C1").unwrap().value(), &Value::String("left".to_string()));
+    assert_eq!(ws.cell("D1").unwrap().value(), &Value::String("right".to_string()));
+}
+
+#[test]
+fn delete_cols_removes_data() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "a");
+    ws.set_cell("B1", "b");
+    ws.set_cell("C1", "c");
+
+    ws.delete_cols(2, 1);
+
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::String("a".to_string()));
+    assert_eq!(ws.cell("B1").unwrap().value(), &Value::String("c".to_string()));
+    assert!(ws.cell("C1").is_none());
+}
+
+#[test]
+fn move_range_overwrites_destination() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.set_cell("A1", "s1");
+    ws.set_cell("B1", "s2");
+    ws.set_cell("B2", "old");
+
+    ws.move_range("A1:B1", 1, 1);
+
+    assert!(ws.cell("A1").is_none());
+    assert!(ws.cell("B1").is_none());
+    assert_eq!(ws.cell("B2").unwrap().value(), &Value::String("s1".to_string()));
+    assert_eq!(ws.cell("C2").unwrap().value(), &Value::String("s2".to_string()));
+}
+
+#[test]
+fn move_range_no_formula_translation() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.set_cell("A1", Value::Formula("SUM(B1:B3)".to_string()));
+    ws.move_range("A1:A1", 1, 1);
+
+    assert_eq!(
+        ws.cell("B2").unwrap().value(),
+        &Value::Formula("SUM(B1:B3)".to_string())
+    );
+}
+
+#[test]
+fn append_updates_dimensions() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+
+    ws.set_cell("A1", "x");
+    ws.append(Row::Ordered(vec![Value::String("y".to_string()), Value::String("z".to_string())]));
+
+    assert_eq!(ws.max_row(), 2);
+    assert_eq!(ws.max_column(), 2);
+    let rows = ws.iter_rows(None, None, None, None);
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn insert_delete_shift_layout_metadata() {
+    let mut wb = Workbook::new();
+    {
+        let ws = wb.active_mut().unwrap();
+        ws.merge_cells("A1:B1");
+        ws.column_width(2, 20.0);
+        ws.row_height(2, 30.0);
+        ws.insert_rows(1, 1);
+        ws.insert_cols(1, 1);
+    }
+
+    let path = temp_path("oxlsx_phase10_layout_shift.xlsx");
+    wb.save(&path).unwrap();
+    let xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("<mergeCell ref=\"B2:C2\""));
+    assert!(xml.contains("<col min=\"3\" max=\"3\" width=\"20"));
+    assert!(xml.contains("<row r=\"3\" ht=\"30"));
+
+    {
+        let ws = wb.active_mut().unwrap();
+        ws.delete_rows(1, 1);
+        ws.delete_cols(1, 1);
+    }
+
+    wb.save(&path).unwrap();
+    let xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("<mergeCell ref=\"A1:B1\""));
+    assert!(xml.contains("<col min=\"2\" max=\"2\" width=\"20"));
+    assert!(xml.contains("<row r=\"2\" ht=\"30"));
 
     fs::remove_file(path).ok();
 }
