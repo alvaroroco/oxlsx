@@ -86,7 +86,12 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     }
 }
 
-pub fn write_xlsx(wb: &Workbook, path: &Path) -> Result<(), OxlsxError> {
+pub fn write_xlsx(
+    wb: &Workbook,
+    path: &Path,
+    source_path: Option<&Path>,
+) -> Result<(), OxlsxError> {
+    let _ = source_path;
     let file = File::create(path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default();
@@ -704,7 +709,7 @@ mod tests {
         wb.active_mut().unwrap().set_cell("A1", "A&B<Z>");
         wb.create_sheet("Data").set_cell("B1", 42.0_f64);
 
-        super::write_xlsx(&wb, &path).unwrap();
+        super::write_xlsx(&wb, &path, None).unwrap();
 
         let file = fs::File::open(&path).unwrap();
         let mut zip = ZipArchive::new(file).unwrap();
@@ -747,7 +752,7 @@ mod tests {
         ws.set_cell("B2", 2.0_f64);
         ws.set_cell("A1", 1.0_f64);
 
-        super::write_xlsx(&wb, &path).unwrap();
+        super::write_xlsx(&wb, &path, None).unwrap();
 
         let file = fs::File::open(&path).unwrap();
         let mut zip = ZipArchive::new(file).unwrap();
@@ -762,6 +767,18 @@ mod tests {
         assert!(a1 < b2);
         assert!(!sheet_xml.contains("r=\"C3\""));
 
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_accepts_missing_source_path() {
+        let path = temp_path("oxlsx_writer_no_source");
+        let mut wb = Workbook::new();
+        wb.active_mut().unwrap().set_cell("A1", "ok");
+
+        super::write_xlsx(&wb, &path, None).unwrap();
+
+        assert!(path.exists());
         fs::remove_file(path).ok();
     }
 }

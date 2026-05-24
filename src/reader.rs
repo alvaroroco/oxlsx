@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
 
@@ -191,6 +191,7 @@ impl Worksheet {
 pub struct Workbook {
     sheets: Vec<Worksheet>,
     active_index: usize,
+    pub(crate) source_path: Option<PathBuf>,
 }
 
 impl Workbook {
@@ -198,11 +199,13 @@ impl Workbook {
         Self {
             sheets: vec![Worksheet::new("Sheet")],
             active_index: 0,
+            source_path: None,
         }
     }
 
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, OxlsxError> {
-        let file = File::open(path)?;
+        let source_path = path.as_ref().to_path_buf();
+        let file = File::open(&source_path)?;
         let mut archive = zip::ZipArchive::new(file).map_err(|err| match err {
             ZipError::InvalidArchive(_) | ZipError::UnsupportedArchive(_) => {
                 OxlsxError::InvalidFormat(err.to_string())
@@ -262,6 +265,7 @@ impl Workbook {
         Ok(Self {
             sheets,
             active_index,
+            source_path: Some(source_path),
         })
     }
 
@@ -305,7 +309,7 @@ impl Workbook {
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), OxlsxError> {
-        crate::writer::write_xlsx(self, path.as_ref())
+        crate::writer::write_xlsx(self, path.as_ref(), self.source_path.as_deref())
     }
 }
 
@@ -861,6 +865,7 @@ mod tests {
                 },
             ],
             active_index: 1,
+            source_path: None,
         };
 
         assert_eq!(wb.sheet(0).unwrap().title(), "Empleados");
@@ -876,6 +881,23 @@ mod tests {
         let wb = Workbook::new();
 
         assert_eq!(wb.sheet(0).unwrap().title(), "Sheet");
+    }
+
+    #[test]
+    fn workbook_new_leaves_source_path_empty() {
+        let wb = Workbook::new();
+
+        assert!(wb.source_path.is_none());
+    }
+
+    #[test]
+    fn workbook_open_tracks_source_path() {
+        let wb = Workbook::open("samples/test.xlsx").unwrap();
+
+        assert_eq!(
+            wb.source_path.as_deref(),
+            Some(std::path::Path::new("samples/test.xlsx"))
+        );
     }
 
     #[test]
