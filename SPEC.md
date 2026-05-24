@@ -27,7 +27,7 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 - `Workbook`: Main entry point — open existing or create new
 - `Worksheet`: Access and set cells by Excel-style reference (`"A1"`, `"B3"`)
 - `Cell`: Contains `Value`, `StyleId`, and `Arc<StyleSheet>`
-- `Value`: `Empty | String(String) | Number(f64) | Bool(bool) | Date(NaiveDate)`
+- `Value`: `Empty | String(String) | Number(f64) | Bool(bool) | Date(NaiveDate) | Formula(String)`
 
 ## 4. Phase Scope
 
@@ -58,7 +58,7 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 5. `wb.save(path)` — valid `.xlsx` with all required OOXML parts
 6. Style deduplication on save; inline strings (`t="inlineStr"`)
 
-### 🔲 Phase 5 — `open_readonly()` Streaming Reader
+### ✅ Phase 5 — `open_readonly()` Streaming Reader
 **Decision**: Option A — fiel a openpyxl. `open_readonly()` expone solo `ws.rows()`, sin `ws.cell("A1")`.
 
 | Mode | `ws.cell("A1")` | `ws.rows()` | Metadata speed |
@@ -74,31 +74,73 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 6. Styles and shared strings still parsed eagerly (small, needed for every cell)
 7. Target: metadata 21ms → ~1ms, beat openpyxl on ALL benchmarks
 
-### 🔲 Phase 6 — PyO3 Python Bindings
+### ✅ Phase 6 — PyO3 Python Bindings
 1. `#[pyclass]` / `#[pymethods]` on all public structs
 2. `maturin` build system + PyPI publish workflow
 3. `cell.value` → native Python `str / int / float / datetime.date`
 4. `wb["Sheet1"]` via `__getitem__`, `ws["A1"] = value` via `__setitem__`
+5. Parametric parity test suite — same tests run against openpyxl and oxlsx
 
-### 🔲 Phase 7 — Read-Modify-Write
+### ✅ Phase 7 — Read-Modify-Write
 1. Open existing `.xlsx`, modify cells, save back
 2. Preserve unsupported parts (charts, images, macros, pivot tables)
+3. Atomic same-path save via `tempfile`
 
-### 🔲 Phase 8 — Extended Write Features
-1. Formulas (`Value::Formula`)
+### ✅ Phase 8 — Extended Write Features
+1. Formulas (`Value::Formula`) — `=` prefix auto-detection in Python
 2. Merged cells, column widths, row heights
-3. Date `numFmtId` on write (`Value::Date` → correct format code)
-4. Shared strings optimization for repeated text
+3. Date `numFmtId` on write (`Value::Date` → `numFmtId=14`)
+4. Shared strings optimization — `xl/sharedStrings.xml`, `t="s"`
+
+### 🔲 Phase 9 — Iteration API
+Mirror openpyxl's most-used read patterns:
+1. `ws.iter_rows(min_row, max_row, min_col, max_col, values_only)` → generator
+2. `ws.iter_cols(min_col, max_col, min_row, max_row, values_only)` → generator
+3. `ws.rows` / `ws.columns` / `ws.values` properties
+4. `ws.max_row`, `ws.max_column`, `ws.min_row`, `ws.min_column` properties
+5. Python bindings for all of the above
+
+### 🔲 Phase 10 — Bulk Write API
+Common patterns for programmatic report generation:
+1. `ws.append(iterable)` — append a row of values at the bottom (list, tuple, dict)
+2. `ws.delete_rows(idx, amount)` / `ws.delete_cols(idx, amount)`
+3. `ws.insert_rows(idx, amount)` / `ws.insert_cols(idx, amount)`
+4. `ws.move_range(cell_range, rows, cols)`
+5. Python bindings for all of the above
+
+### 🔲 Phase 11 — Rich Cell Formatting
+Complete the formatting surface to match openpyxl:
+1. `cell.number_format` — read and write custom number format strings
+2. `cell.alignment` — `Alignment` struct: horizontal, vertical, wrap_text, indent
+3. `cell.border` — `Border` / `Side` structs: style, color per edge
+4. `cell.protection` — locked, hidden flags
+5. Full style round-trip: open → read styles → modify → save with correct styles
+
+### 🔲 Phase 12 — Hyperlinks and Comments
+1. `cell.hyperlink` — read and write hyperlinks (`<hyperlink>` element + rels)
+2. `cell.comment` — read and write comments (`xl/comments*.xml` + drawings)
+
+### 🔲 Phase 13 — Named Ranges and Tables
+1. Named ranges — `wb.defined_names`, `ws.add_named_range`
+2. Tables — `ws.add_table(Table(...))`, `ws.tables` property
+3. `ws.freeze_panes` — freeze rows/columns
+4. `ws.print_area`, `ws.print_title_rows`, `ws.print_title_cols`
+
+### 🔲 Phase 14 — PyPI Publish + CI/CD
+1. `maturin publish` workflow for PyPI releases
+2. GitHub Actions: build wheels for Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows
+3. Version management — `Cargo.toml` + `pyproject.toml` in sync
+4. `crates.io` publish for the Rust library
 
 ## 5. Performance Targets
 
-| Metric | Target | Current (Phase 4) |
-|--------|--------|-------------------|
-| Read 100k rows with formatting | < 500ms | ~250ms est. |
-| Memory for 1GB file | < 50MB | Eager load — Phase 5 required |
-| Write 10k rows | < 50ms | **42ms** ✅ |
-| Style resolution (font + fill) | < 10ns | **1.5ns** ✅ |
-| Beat openpyxl on ALL benchmarks | Phase 5 | Write: ✅ Read metadata: Phase 5 |
+| Metric | Target | Status |
+|--------|--------|--------|
+| Read 100k rows with formatting | < 500ms | ✅ ~250ms |
+| Memory for 1GB file | < 50MB | ✅ Streaming via Phase 5 |
+| Write 10k rows | < 50ms | ✅ 42ms |
+| Style resolution (font + fill) | < 10ns | ✅ 1.5ns |
+| Beat openpyxl on ALL benchmarks | Phase 5+ | Write: ✅ Read metadata: ✅ |
 
 ## 6. API Parity Reference
 
@@ -116,3 +158,5 @@ All public APIs must be verified against:
 | `zip` | OOXML container | deflate only (PyO3 wheel size) |
 | `thiserror` | Error types | — |
 | `chrono` | Date resolution | `default-features = false` |
+| `tempfile` | Atomic same-path save | — |
+| `indexmap` | Ordered shared strings dedup | — |
