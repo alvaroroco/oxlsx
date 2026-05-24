@@ -1,3 +1,4 @@
+pub(crate) mod coords;
 pub mod error;
 #[cfg(feature = "python")]
 pub mod python;

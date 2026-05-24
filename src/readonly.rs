@@ -1,3 +1,4 @@
+use crate::coords::{column_index, column_name};
 use crate::reader::CellDecoder;
 use crate::workbook_rels::parse_sheet_refs;
 use crate::{Cell, OxlsxError, SharedStrings, StyleSheet};
@@ -221,8 +222,11 @@ impl<R: BufRead> Iterator for RowIter<R> {
                     if let Some(cell) = self.decoder.finish_cell(self.styles.clone())
                         && self.in_row
                     {
-                        let col = column_index(cell.reference()).unwrap_or(1);
-                        self.row_cells.push((col, cell));
+                        if let Some(col) =
+                            column_index(cell.reference()).and_then(|c| usize::try_from(c).ok())
+                        {
+                            self.row_cells.push((col, cell));
+                        }
                     }
                 }
                 Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"v" => {
@@ -266,8 +270,11 @@ impl<R: BufRead> Iterator for RowIter<R> {
                     if let Some(cell) = self.decoder.finish_cell(self.styles.clone())
                         && self.in_row
                     {
-                        let col = column_index(cell.reference()).unwrap_or(1);
-                        self.row_cells.push((col, cell));
+                        if let Some(col) =
+                            column_index(cell.reference()).and_then(|c| usize::try_from(c).ok())
+                        {
+                            self.row_cells.push((col, cell));
+                        }
                     }
                 }
                 Ok(Event::Eof) => {
@@ -398,10 +405,11 @@ fn materialize_row(
             continue;
         }
 
-        result.push(Cell::empty(
-            format!("{}{}", column_name(col), row_num),
-            styles.clone(),
-        ));
+        let Some(col_u32) = u32::try_from(col).ok() else {
+            continue;
+        };
+        let reference = format!("{}{}", column_name(col_u32), row_num);
+        result.push(Cell::empty(reference, styles.clone()));
     }
 
     result
@@ -429,7 +437,7 @@ fn parse_sheet_dimension<R: BufRead>(reader: R) -> Result<Option<usize>, OxlsxEr
 
 fn dimension_last_column(range: &str) -> Option<usize> {
     let target = range.rsplit(':').next()?;
-    column_index(target)
+    column_index(target).and_then(|c| usize::try_from(c).ok())
 }
 
 fn row_number(cell_start: &BytesStart<'_>) -> Option<usize> {
@@ -448,35 +456,6 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
     }
 
     Ok(None)
-}
-
-fn column_index(reference: &str) -> Option<usize> {
-    let mut col = 0usize;
-    let mut seen = false;
-
-    for b in reference.bytes() {
-        if b.is_ascii_alphabetic() {
-            seen = true;
-            let upper = b.to_ascii_uppercase();
-            col = col
-                .checked_mul(26)?
-                .checked_add((upper - b'A' + 1) as usize)?;
-        } else {
-            break;
-        }
-    }
-
-    if seen { Some(col) } else { None }
-}
-
-fn column_name(mut index: usize) -> String {
-    let mut chars = Vec::new();
-    while index > 0 {
-        index -= 1;
-        chars.push((b'A' + (index % 26) as u8) as char);
-        index /= 26;
-    }
-    chars.iter().rev().collect()
 }
 
 #[cfg(test)]
