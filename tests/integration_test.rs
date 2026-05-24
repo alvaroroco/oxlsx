@@ -482,6 +482,51 @@ fn write_unmerge_cells() {
 }
 
 #[test]
+fn phase9_empty_worksheet_bounds_and_rows_are_defined() {
+    let wb = Workbook::new();
+    let ws = wb.active().unwrap();
+
+    assert_eq!(ws.min_row(), 1);
+    assert_eq!(ws.max_row(), 1);
+    assert_eq!(ws.min_column(), 1);
+    assert_eq!(ws.max_column(), 1);
+
+    let rows = ws.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 1);
+    assert_eq!(rows[0][0].value(), &Value::Empty);
+}
+
+#[test]
+fn phase9_rows_columns_and_values_match_rectangular_iteration() {
+    let wb = Workbook::open("samples/test.xlsx").unwrap();
+    let ws = wb.active().unwrap();
+
+    let rows = ws.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 3);
+    assert_eq!(rows[0][0].value(), &Value::String("Hola".to_string()));
+    assert_eq!(rows[0][1].value(), &Value::String("Hola".to_string()));
+    assert_eq!(rows[0][2].value(), &Value::Number(42.0));
+
+    let columns = ws.columns();
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns[0].len(), 1);
+    assert_eq!(columns[0][0].value(), &Value::String("Hola".to_string()));
+    assert_eq!(columns[2][0].value(), &Value::Number(42.0));
+
+    let values = ws.values();
+    assert_eq!(
+        values,
+        vec![vec![
+            Value::String("Hola".to_string()),
+            Value::String("Hola".to_string()),
+            Value::Number(42.0)
+        ]]
+    );
+}
+
+#[test]
 fn write_shared_strings() {
     let path = temp_path("oxlsx_write_shared_strings.xlsx");
     let mut wb = Workbook::new();
