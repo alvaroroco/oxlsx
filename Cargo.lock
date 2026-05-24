@@ -493,6 +493,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
+ "indexmap",
  "pyo3",
  "quick-xml",
  "tempfile",

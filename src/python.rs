@@ -176,6 +176,42 @@ impl PyWorksheet {
         let coord = rc_to_a1(row, column);
         self.cell_from_coord(&coord)
     }
+
+    fn merge_cells(&self, range: &str) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.merge_cells(range);
+        Ok(())
+    }
+
+    fn unmerge_cells(&self, range: &str) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.unmerge_cells(range);
+        Ok(())
+    }
+
+    fn column_width(&self, col: u32, width: f64) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.column_width(col, width);
+        Ok(())
+    }
+
+    fn row_height(&self, row: u32, height: f64) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.row_height(row, height);
+        Ok(())
+    }
 }
 
 #[pyclass(name = "Cell")]
@@ -329,6 +365,10 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     if let Ok(value) = obj.extract::<String>() {
+        if let Some(formula) = value.strip_prefix('=') {
+            return Ok(Value::Formula(formula.to_string()));
+        }
+
         return Ok(Value::String(value));
     }
 
@@ -397,6 +437,9 @@ mod tests {
             assert_eq!(py_date.get_year(), 2025);
             assert_eq!(py_date.get_month(), 1);
             assert_eq!(py_date.get_day(), 21);
+
+            let formula = value_to_py(&Value::Formula("SUM(B1:B3)".to_string()), py);
+            assert_eq!(formula.bind(py).extract::<String>().unwrap(), "=SUM(B1:B3)");
         });
     }
 
@@ -422,6 +465,12 @@ mod tests {
             assert_eq!(
                 py_to_value(str_obj.bind(py)).unwrap(),
                 Value::String("Hola".to_string())
+            );
+
+            let formula_obj: PyObject = "=SUM(B1:B3)".into_py(py);
+            assert_eq!(
+                py_to_value(formula_obj.bind(py)).unwrap(),
+                Value::Formula("SUM(B1:B3)".to_string())
             );
 
             let date_obj = PyDate::new_bound(py, 2025, 1, 21).unwrap();

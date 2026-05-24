@@ -480,3 +480,41 @@ fn write_unmerge_cells() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn write_shared_strings() {
+    let path = temp_path("oxlsx_write_shared_strings.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "hello");
+    ws.set_cell("A2", "hello");
+    ws.set_cell("A3", "hello");
+    wb.save(&path).unwrap();
+
+    let shared_strings_xml = read_zip_entry(&path, "xl/sharedStrings.xml");
+    let count = shared_strings_xml
+        .match_indices("<si><t>hello</t></si>")
+        .count();
+    assert_eq!(count, 1);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn write_shared_strings_index() {
+    let path = temp_path("oxlsx_write_shared_strings_index.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "hello");
+    ws.set_cell("B1", "world");
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet_xml.contains("r=\"A1\""));
+    assert!(sheet_xml.contains("r=\"B1\""));
+    assert!(sheet_xml.contains("t=\"s\""));
+    assert!(sheet_xml.contains("<v>0</v>"));
+    assert!(sheet_xml.contains("<v>1</v>"));
+
+    fs::remove_file(path).ok();
+}
