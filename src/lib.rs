@@ -1,7 +1,9 @@
 pub mod error;
+pub mod hyperlink;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod reader;
+pub mod relationships;
 pub mod readonly;
 pub mod shared_strings;
 pub mod styles;
@@ -9,6 +11,7 @@ pub mod workbook_rels;
 pub mod writer;
 
 pub use error::OxlsxError;
+pub use hyperlink::Hyperlink;
 pub use reader::Value;
 pub use reader::{Cell, Workbook, Worksheet};
 pub use readonly::{ReadonlyWorkbook, ReadonlyWorksheet, RowIter};
