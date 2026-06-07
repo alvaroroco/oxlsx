@@ -1,5 +1,6 @@
 use crate::workbook_rels::parse_sheet_refs;
-use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
+use crate::{Fill, Font, Hyperlink, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
+use crate::relationships::{SheetRelationship, parse_sheet_rels, sheet_rels_path};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -65,6 +66,7 @@ pub struct Cell {
     styles: Arc<StyleSheet>,
     pub(crate) write_font: Option<Font>,
     pub(crate) write_fill: Option<Fill>,
+    pub(crate) write_hyperlink: Option<Hyperlink>,
 }
 
 impl Cell {
@@ -95,6 +97,10 @@ impl Cell {
         }
     }
 
+    pub fn hyperlink(&self) -> Option<&Hyperlink> {
+        self.write_hyperlink.as_ref()
+    }
+
     pub(crate) fn parsed(
         reference: String,
         value: Value,
@@ -108,6 +114,7 @@ impl Cell {
             styles,
             write_font: None,
             write_fill: None,
+            write_hyperlink: None,
         }
     }
 
@@ -123,6 +130,7 @@ pub struct Worksheet {
     pub(crate) merged_cells: Vec<String>,
     pub(crate) column_widths: HashMap<u32, f64>,
     pub(crate) row_heights: HashMap<u32, f64>,
+    pub(crate) sheet_rels: Vec<SheetRelationship>,
 }
 
 impl Worksheet {
@@ -133,6 +141,7 @@ impl Worksheet {
             merged_cells: Vec::new(),
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            sheet_rels: Vec::new(),
         }
     }
 
@@ -149,48 +158,23 @@ impl Worksheet {
     }
 
     pub fn set_cell(&mut self, reference: &str, value: impl Into<Value>) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.value = value.into();
     }
 
     pub fn set_cell_font(&mut self, reference: &str, font: Font) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.write_font = Some(font);
     }
 
     pub fn set_cell_fill(&mut self, reference: &str, fill: Fill) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.write_fill = Some(fill);
+    }
+
+    pub fn set_cell_hyperlink(&mut self, reference: &str, hyperlink: impl Into<Hyperlink>) {
+        let cell = self.ensure_cell_mut(reference);
+        cell.write_hyperlink = Some(hyperlink.into());
     }
 
     pub fn merge_cells(&mut self, range: &str) {
@@ -210,6 +194,20 @@ impl Worksheet {
 
     pub fn row_height(&mut self, row: u32, height: f64) {
         self.row_heights.insert(row, height);
+    }
+
+    fn ensure_cell_mut(&mut self, reference: &str) -> &mut Cell {
+        self.cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                write_hyperlink: None,
+            })
     }
 }
 
@@ -285,9 +283,35 @@ impl Workbook {
             let sheet_file = archive
                 .by_name(&sheet_ref.zip_path)
                 .map_err(|_| OxlsxError::MissingPart(sheet_ref.zip_path.clone()))?;
-            let mut ws = parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?;
-            ws.name = sheet_ref.name.clone();
-            sheets.push(ws);
+
+            let ParsedSheet {
+                mut worksheet,
+                hyperlink_refs,
+            } = parse_sheet_with_hyperlinks(
+                BufReader::new(sheet_file),
+                styles.clone(),
+                &shared_strings,
+            )?;
+
+            let rels = match archive.by_name(&sheet_rels_path(&sheet_ref.zip_path)) {
+                Ok(rels_file) => parse_sheet_rels(BufReader::new(rels_file))?,
+                Err(ZipError::FileNotFound) => Vec::new(),
+                Err(err) => return Err(OxlsxError::Zip(err)),
+            };
+
+            for (cell_ref, rel_id) in hyperlink_refs {
+                if let Some(target) = SheetRelationship::hyperlink_target_by_id(&rels, &rel_id) {
+                    worksheet.set_cell_hyperlink(&cell_ref, Hyperlink::new(target));
+                }
+            }
+
+            worksheet.sheet_rels = rels
+                .into_iter()
+                .filter(|rel| matches!(rel, SheetRelationship::Unknown { .. }))
+                .collect();
+
+            worksheet.name = sheet_ref.name.clone();
+            sheets.push(worksheet);
         }
 
         Ok(Self {
@@ -348,11 +372,25 @@ impl Default for Workbook {
     }
 }
 
+#[cfg(test)]
 fn parse_sheet<R: BufRead>(
     reader: R,
     styles: Arc<StyleSheet>,
     shared_strings: &[String],
 ) -> Result<Worksheet, OxlsxError> {
+    Ok(parse_sheet_with_hyperlinks(reader, styles, shared_strings)?.worksheet)
+}
+
+struct ParsedSheet {
+    worksheet: Worksheet,
+    hyperlink_refs: HashMap<String, String>,
+}
+
+fn parse_sheet_with_hyperlinks<R: BufRead>(
+    reader: R,
+    styles: Arc<StyleSheet>,
+    shared_strings: &[String],
+) -> Result<ParsedSheet, OxlsxError> {
     let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
@@ -362,6 +400,7 @@ fn parse_sheet<R: BufRead>(
     let mut merged_cells = Vec::new();
     let mut column_widths = HashMap::new();
     let mut row_heights = HashMap::new();
+    let mut hyperlink_refs = HashMap::new();
 
     loop {
         match xml.read_event_into(&mut buf)? {
@@ -378,6 +417,9 @@ fn parse_sheet<R: BufRead>(
                 if let Some(range_ref) = attr_value(&e, b"ref")? {
                     merged_cells.push(range_ref);
                 }
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"hyperlink" => {
+                collect_hyperlink_ref(&e, &mut hyperlink_refs)?;
             }
             Event::Start(e) if e.local_name().as_ref() == b"v" => {
                 decoder.start_value();
@@ -404,6 +446,9 @@ fn parse_sheet<R: BufRead>(
                 if let Some(range_ref) = attr_value(&e, b"ref")? {
                     merged_cells.push(range_ref);
                 }
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"hyperlink" => {
+                collect_hyperlink_ref(&e, &mut hyperlink_refs)?;
             }
             Event::Text(t) if decoder.in_value() => {
                 decoder.push_value_text(&t.unescape()?);
@@ -438,13 +483,30 @@ fn parse_sheet<R: BufRead>(
         buf.clear();
     }
 
-    Ok(Worksheet {
-        name: String::new(),
-        cells,
-        merged_cells,
-        column_widths,
-        row_heights,
+    Ok(ParsedSheet {
+        worksheet: Worksheet {
+            name: String::new(),
+            cells,
+            merged_cells,
+            column_widths,
+            row_heights,
+            sheet_rels: Vec::new(),
+        },
+        hyperlink_refs,
     })
+}
+
+fn collect_hyperlink_ref(
+    e: &BytesStart<'_>,
+    hyperlink_refs: &mut HashMap<String, String>,
+) -> Result<(), OxlsxError> {
+    let cell_ref = attr_value(e, b"ref")?;
+    let rel_id = attr_value(e, b"r:id")?.or(attr_value(e, b"id")?);
+    if let (Some(cell_ref), Some(rel_id)) = (cell_ref, rel_id) {
+        hyperlink_refs.insert(cell_ref, rel_id);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -759,6 +821,19 @@ mod tests {
   </sheetData>
 </worksheet>"#;
 
+    const HYPERLINK_SHEET_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="s"><v>0</v></c>
+    </row>
+  </sheetData>
+  <hyperlinks>
+    <hyperlink ref="A1" r:id="rId9"/>
+  </hyperlinks>
+</worksheet>"#;
+
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="3">
@@ -897,6 +972,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_hyperlink: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -907,6 +983,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_hyperlink: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -917,6 +994,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            write_hyperlink: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -927,6 +1005,7 @@ mod tests {
             styles,
             write_font: None,
             write_fill: None,
+            write_hyperlink: None,
         };
         assert_eq!(empty_cell.text(), None);
     }
@@ -987,6 +1066,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_sheet_collects_hyperlink_relationship_references() {
+        let styles = Arc::new(StyleSheet::default());
+        let parsed = super::parse_sheet_with_hyperlinks(
+            Cursor::new(HYPERLINK_SHEET_XML.as_bytes()),
+            styles,
+            &["docs".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.hyperlink_refs.get("A1").map(String::as_str),
+            Some("rId9")
+        );
+    }
+
+    #[test]
     fn worksheet_title_and_workbook_multi_sheet_accessors() {
         let wb = Workbook {
             sheets: vec![
@@ -996,6 +1091,7 @@ mod tests {
                     merged_cells: Vec::new(),
                     column_widths: HashMap::new(),
                     row_heights: HashMap::new(),
+                    sheet_rels: Vec::new(),
                 },
                 Worksheet {
                     name: "Productos".to_string(),
@@ -1003,6 +1099,7 @@ mod tests {
                     merged_cells: Vec::new(),
                     column_widths: HashMap::new(),
                     row_heights: HashMap::new(),
+                    sheet_rels: Vec::new(),
                 },
             ],
             active_index: 1,

@@ -1,4 +1,5 @@
 use crate::styles::CellXf;
+use crate::relationships::{SheetRelationship, allocate_next_rid, serialize_sheet_rels, sheet_rels_path};
 use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
@@ -270,6 +271,10 @@ fn write_xlsx_to_path(
             &shared_strings,
         )?;
         written_entries.insert(format!("xl/worksheets/sheet{}.xml", idx + 1));
+
+        if let Some(rels_part) = write_sheet_rels_xml(&mut zip, options, ws, idx)? {
+            written_entries.insert(rels_part);
+        }
     }
 
     if let Some(source) = source_path {
@@ -323,7 +328,10 @@ fn is_writer_owned_entry(name: &str, sheet_count: usize, preserve_original: bool
         return true;
     }
 
-    (1..=sheet_count).any(|sheet_idx| name == format!("xl/worksheets/sheet{sheet_idx}.xml"))
+    (1..=sheet_count).any(|sheet_idx| {
+        name == format!("xl/worksheets/sheet{sheet_idx}.xml")
+            || name == format!("xl/worksheets/_rels/sheet{sheet_idx}.xml.rels")
+    })
 }
 
 fn write_content_types(
@@ -837,6 +845,28 @@ fn write_sheet_xml(
 
     write_end(&mut xml, "sheetData")?;
 
+    let (hyperlink_entries, _) = collect_sheet_hyperlink_rels(ws);
+    if !hyperlink_entries.is_empty() {
+        write_start(
+            &mut xml,
+            "hyperlinks",
+            &[(
+                "xmlns:r",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            )],
+        )?;
+
+        for (reference, rel_id) in hyperlink_entries {
+            write_empty(
+                &mut xml,
+                "hyperlink",
+                &[("ref", reference.as_str()), ("r:id", rel_id.as_str())],
+            )?;
+        }
+
+        write_end(&mut xml, "hyperlinks")?;
+    }
+
     if !ws.merged_cells.is_empty() {
         let count = ws.merged_cells.len().to_string();
         write_start(&mut xml, "mergeCells", &[("count", count.as_str())])?;
@@ -849,6 +879,48 @@ fn write_sheet_xml(
     write_end(&mut xml, "worksheet")?;
     let part = format!("xl/worksheets/sheet{}.xml", sheet_idx + 1);
     write_zip_entry(zip, options, part.as_str(), xml.into_inner())
+}
+
+fn write_sheet_rels_xml(
+    zip: &mut ZipWriter<File>,
+    options: SimpleFileOptions,
+    ws: &Worksheet,
+    sheet_idx: usize,
+) -> Result<Option<String>, OxlsxError> {
+    let (_, rels) = collect_sheet_hyperlink_rels(ws);
+
+    if rels.is_empty() {
+        return Ok(None);
+    }
+
+    let xml = serialize_sheet_rels(&rels)?;
+    let part = sheet_rels_path(&format!("xl/worksheets/sheet{}.xml", sheet_idx + 1));
+    write_zip_entry(zip, options, part.as_str(), xml)?;
+
+    Ok(Some(part))
+}
+
+fn collect_sheet_hyperlink_rels(ws: &Worksheet) -> (Vec<(String, String)>, Vec<SheetRelationship>) {
+    let mut entries = ws
+        .cells()
+        .iter()
+        .filter_map(|(reference, cell)| {
+            cell.write_hyperlink
+                .as_ref()
+                .map(|hyperlink| (reference.clone(), hyperlink.target().to_string()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(reference, _)| cell_sort_key(reference));
+
+    let mut rels = ws.sheet_rels.clone();
+    let mut hyperlink_entries = Vec::with_capacity(entries.len());
+    for (reference, target) in entries {
+        let rel_id = allocate_next_rid(&rels);
+        rels.push(SheetRelationship::hyperlink(rel_id.clone(), target));
+        hyperlink_entries.push((reference, rel_id));
+    }
+
+    (hyperlink_entries, rels)
 }
 
 fn write_cell(
