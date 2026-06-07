@@ -196,6 +196,30 @@ python3 benches/openpyxl_comparison.py  # Python baseline
   - Date numFmt on write (`Value::Date` → proper `numFmtId`)
   - Shared strings optimization for repeated text
 
+- [ ] **Phase 9 — Worksheet iteration API**
+  - `iter_rows`, `iter_cols`, `rows`, `columns`, `values`
+  - `max_row`, `max_column`, `min_row`, `min_column`
+
+- [ ] **Phase 10 — Bulk write API**
+  - `append`, insert/delete rows/cols, `move_range`
+
+- [ ] **Phase 11 — Rich formatting**
+  - `number_format`, `alignment`, `border`, `protection`
+
+- [ ] **Phase 12 — Hyperlinks**
+  - `cell.hyperlink` read/write and sheet rel support
+
+- [ ] **Phase 13 — Comments**
+  - `cell.comment` read/write, comments XML + VML plumbing
+
+- [ ] **Phase 14 — Distribution / CI hardening**
+  - PyPI + crates.io publish workflows, wheel matrix, release automation
+
+- [ ] **Phase 15 — Pandas engine / tabular adapter**
+  - `engine="oxlsx"` integration via a dedicated adapter
+  - DataFrame ↔ XLSX mapping, headers/index handling, and type conversions
+  - Explicit adapter instead of monkeypatching by default
+
 ## License
 
 Licensed under either of:
