@@ -3,8 +3,8 @@ pub mod hyperlink;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod reader;
-pub mod relationships;
 pub mod readonly;
+pub mod relationships;
 pub mod shared_strings;
 pub mod styles;
 pub mod workbook_rels;

@@ -1,6 +1,8 @@
-use crate::workbook_rels::parse_sheet_refs;
-use crate::{Fill, Font, Hyperlink, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use crate::relationships::{SheetRelationship, parse_sheet_rels, sheet_rels_path};
+use crate::workbook_rels::parse_sheet_refs;
+use crate::{
+    Fill, Font, Hyperlink, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet,
+};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};

@@ -60,9 +60,9 @@ impl SheetRelationship {
 
     pub fn hyperlink_target_by_id<'a>(rels: &'a [SheetRelationship], id: &str) -> Option<&'a str> {
         rels.iter().find_map(|rel| match rel {
-            SheetRelationship::Hyperlink { id: rel_id, target, .. } if rel_id == id => {
-                Some(target.as_str())
-            }
+            SheetRelationship::Hyperlink {
+                id: rel_id, target, ..
+            } if rel_id == id => Some(target.as_str()),
             _ => None,
         })
     }
@@ -233,9 +233,7 @@ fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxErr
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SheetRelationship, allocate_next_rid, parse_sheet_rels, serialize_sheet_rels,
-    };
+    use super::{SheetRelationship, allocate_next_rid, parse_sheet_rels, serialize_sheet_rels};
     use std::io::Cursor;
 
     const SHEET_RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

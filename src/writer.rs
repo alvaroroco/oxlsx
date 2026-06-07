@@ -1,5 +1,7 @@
+use crate::relationships::{
+    SheetRelationship, allocate_next_rid, serialize_sheet_rels, sheet_rels_path,
+};
 use crate::styles::CellXf;
-use crate::relationships::{SheetRelationship, allocate_next_rid, serialize_sheet_rels, sheet_rels_path};
 use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
