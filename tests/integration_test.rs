@@ -1,9 +1,11 @@
 use chrono::NaiveDate;
-use oxlsx::{Color, Fill, Font, StyleId, Value, Workbook};
+use oxlsx::{Color, Fill, Font, Hyperlink, StyleId, Value, Workbook};
 use std::env;
 use std::fs;
 use std::io::Read;
 use zip::ZipArchive;
+use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     env::temp_dir().join(name)
@@ -18,6 +20,31 @@ fn read_zip_entry(path: &std::path::Path, entry: &str) -> String {
         .read_to_string(&mut xml)
         .unwrap();
     xml
+}
+
+fn clone_with_sheet_relationship(path: &std::path::Path, output: &std::path::Path, rels_xml: &str) {
+    let source_file = fs::File::open(path).unwrap();
+    let mut source_zip = ZipArchive::new(source_file).unwrap();
+
+    let target_file = fs::File::create(output).unwrap();
+    let mut target_zip = ZipWriter::new(target_file);
+    let options = SimpleFileOptions::default();
+
+    for index in 0..source_zip.len() {
+        let mut entry = source_zip.by_index(index).unwrap();
+        let name = entry.name().to_string();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+
+        target_zip.start_file(name, options).unwrap();
+        std::io::Write::write_all(&mut target_zip, &bytes).unwrap();
+    }
+
+    target_zip
+        .start_file("xl/worksheets/_rels/sheet1.xml.rels", options)
+        .unwrap();
+    std::io::Write::write_all(&mut target_zip, rels_xml.as_bytes()).unwrap();
+    target_zip.finish().unwrap();
 }
 
 #[test]
@@ -515,6 +542,98 @@ fn write_shared_strings_index() {
     assert!(sheet_xml.contains("t=\"s\""));
     assert!(sheet_xml.contains("<v>0</v>"));
     assert!(sheet_xml.contains("<v>1</v>"));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn hyperlink_round_trip() {
+    let path = temp_path("oxlsx_hyperlink_round_trip.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "Docs");
+    ws.set_cell_hyperlink("A1", Hyperlink::new("https://example.com/docs"));
+
+    wb.save(&path).unwrap();
+
+    let reloaded = Workbook::open(&path).unwrap();
+    let link = reloaded
+        .active()
+        .unwrap()
+        .cell("A1")
+        .unwrap()
+        .hyperlink()
+        .unwrap();
+    assert_eq!(link.target(), "https://example.com/docs");
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn hyperlink_write_new_cell() {
+    let path = temp_path("oxlsx_hyperlink_write_new_cell.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut()
+        .unwrap()
+        .set_cell_hyperlink("B2", "https://example.com/new");
+
+    wb.save(&path).unwrap();
+
+    let reloaded = Workbook::open(&path).unwrap();
+    let link = reloaded
+        .active()
+        .unwrap()
+        .cell("B2")
+        .unwrap()
+        .hyperlink()
+        .unwrap();
+    assert_eq!(link.target(), "https://example.com/new");
+
+    let rels_xml = read_zip_entry(&path, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(rels_xml.contains("TargetMode=\"External\""));
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn sheet_relationships_preserved() {
+    let seed = temp_path("oxlsx_sheet_relationships_seed.xlsx");
+    let mutated = temp_path("oxlsx_sheet_relationships_mutated.xlsx");
+    let saved = temp_path("oxlsx_sheet_relationships_saved.xlsx");
+
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("A1", "seed");
+    wb.save(&seed).unwrap();
+
+    let unknown_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/>
+</Relationships>"#;
+    clone_with_sheet_relationship(&seed, &mutated, unknown_rels);
+
+    let mut wb2 = Workbook::open(&mutated).unwrap();
+    wb2.active_mut().unwrap().set_cell("A1", "changed");
+    wb2.save(&saved).unwrap();
+
+    let rels_xml = read_zip_entry(&saved, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(rels_xml.contains("relationships/comments"));
+    assert!(rels_xml.contains("Id=\"rId7\""));
+
+    fs::remove_file(seed).ok();
+    fs::remove_file(mutated).ok();
+    fs::remove_file(saved).ok();
+}
+
+#[test]
+fn save_skips_sheet_rels_when_no_hyperlinks_present() {
+    let path = temp_path("oxlsx_no_hyperlink_sheet_rels.xlsx");
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell("A1", "plain");
+    wb.save(&path).unwrap();
+
+    let file = fs::File::open(&path).unwrap();
+    let mut zip = ZipArchive::new(file).unwrap();
+    assert!(zip.by_name("xl/worksheets/_rels/sheet1.xml.rels").is_err());
 
     fs::remove_file(path).ok();
 }

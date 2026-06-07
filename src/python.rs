@@ -1,7 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::useless_conversion)]
 
-use crate::{Cell, Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook};
+use crate::{Cell, Color, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value, Workbook};
 use chrono::Datelike;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule};
@@ -212,6 +212,15 @@ impl PyWorksheet {
         sheet.row_height(row, height);
         Ok(())
     }
+
+    fn set_cell_hyperlink(&self, coord: &str, target: &str) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_hyperlink(coord, Hyperlink::new(target));
+        Ok(())
+    }
 }
 
 #[pyclass(name = "Cell")]
@@ -242,6 +251,11 @@ impl PyCell {
             .cloned()
             .or_else(|| self.inner.write_fill.clone())
             .map(|inner| PyFill { inner })
+    }
+
+    #[getter]
+    fn hyperlink(&self) -> Option<String> {
+        self.inner.hyperlink().map(|link| link.target().to_string())
     }
 }
 

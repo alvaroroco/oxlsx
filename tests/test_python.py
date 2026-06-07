@@ -30,6 +30,14 @@ def _oxlsx_load(path):
     return oxlsx.load_workbook(path)
 
 
+def _load_impl(name):
+    if name == "openpyxl":
+        return _openpyxl_load
+    if name == "oxlsx":
+        return _oxlsx_load
+    raise ValueError(f"unknown impl: {name}")
+
+
 @pytest.fixture(params=["openpyxl", "oxlsx"])
 def load_wb(request):
     if request.param == "openpyxl":
@@ -350,3 +358,42 @@ def test_ws_rows_property(load_wb):
     rows = list(wb.active.rows)
     assert len(rows) == 1
     assert rows[0][0].value == "Hola"
+
+
+@pytest.mark.parametrize("impl", ["oxlsx"], ids=["oxlsx"])
+def test_hyperlink_round_trip(impl):
+    load = _load_impl(impl)
+
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    ws["A1"] = "Docs"
+    ws.set_cell_hyperlink("A1", "https://example.com/docs")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        wb.save(path)
+        reloaded = load(path)
+        assert reloaded.active["A1"].hyperlink == "https://example.com/docs"
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.parametrize("impl", ["oxlsx"], ids=["oxlsx"])
+def test_hyperlink_write_new_cell(impl):
+    load = _load_impl(impl)
+
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    ws.set_cell_hyperlink("B2", "https://example.com/new")
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+
+    try:
+        wb.save(path)
+        reloaded = load(path)
+        assert reloaded.active["B2"].hyperlink == "https://example.com/new"
+    finally:
+        os.unlink(path)
