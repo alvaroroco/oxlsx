@@ -2,13 +2,15 @@ use crate::comments::{Comment, parse_comments_xml};
 use crate::coords::{column_index, make_absolute_range, rc_to_a1};
 use crate::defined_names::parse_workbook_defined_names;
 use crate::sheet_rels::{
-    COMMENTS_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, parse_sheet_rels, relation_target_for_type,
-    relation_targets_for_type, resolve_sheet_target, sheet_rels_path,
+    COMMENTS_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, parse_sheet_rels, relation_target_for_id,
+    relation_target_for_type, relation_targets_for_type, resolve_sheet_target, sheet_rels_path,
 };
 use crate::table::{RawTable, Table, derive_columns_from_header, parse_table_xml};
 use crate::workbook_rels::parse_sheet_refs;
 use crate::xml::attr_value;
-use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
+use crate::{
+    Fill, Font, Hyperlink, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet,
+};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -75,6 +77,7 @@ pub struct Cell {
     pub(crate) write_font: Option<Font>,
     pub(crate) write_fill: Option<Fill>,
     pub(crate) comment: Option<Comment>,
+    pub(crate) write_hyperlink: Option<Hyperlink>,
 }
 
 impl Cell {
@@ -109,6 +112,15 @@ impl Cell {
         self.comment.as_ref()
     }
 
+    /// The cell's hyperlink, if any.
+    ///
+    /// Mirrors openpyxl's `cell.hyperlink`. External links carry a non-empty
+    /// `target`; internal `location`-only links and `tooltip`/`display` are
+    /// preserved verbatim across read-modify-write.
+    pub fn hyperlink(&self) -> Option<&Hyperlink> {
+        self.write_hyperlink.as_ref()
+    }
+
     pub(crate) fn parsed(
         reference: String,
         value: Value,
@@ -123,6 +135,7 @@ impl Cell {
             write_font: None,
             write_fill: None,
             comment: None,
+            write_hyperlink: None,
         }
     }
 
@@ -316,6 +329,19 @@ impl Worksheet {
     pub fn set_cell_comment(&mut self, reference: &str, comment: Comment) {
         let cell = self.ensure_cell_mut(reference);
         cell.comment = Some(comment);
+    }
+
+    /// Attach an external-URL hyperlink to `reference`, creating the cell if
+    /// needed. Mirrors openpyxl's `cell.hyperlink = "https://..."`.
+    ///
+    /// An empty `target` is a no-op: an empty hyperlink emits nothing, matching
+    /// the spec ("An empty target MUST NOT emit a hyperlink").
+    pub fn set_cell_hyperlink(&mut self, reference: &str, target: &str) {
+        if target.is_empty() {
+            return;
+        }
+        let cell = self.ensure_cell_mut(reference);
+        cell.write_hyperlink = Some(Hyperlink::new_external(target));
     }
 
     pub fn merge_cells(&mut self, range: &str) {
@@ -531,6 +557,7 @@ impl Worksheet {
                 write_font: None,
                 write_fill: None,
                 comment: None,
+                write_hyperlink: None,
             })
     }
 }
@@ -653,7 +680,8 @@ impl Workbook {
             let sheet_file = archive
                 .by_name(&sheet_ref.zip_path)
                 .map_err(|_| OxlsxError::MissingPart(sheet_ref.zip_path.clone()))?;
-            let mut ws = parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?;
+            let (mut ws, raw_hyperlinks) =
+                parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?;
             ws.name = sheet_ref.name.clone();
 
             let rels_path = sheet_rels_path(&sheet_ref.zip_path);
@@ -702,6 +730,32 @@ impl Workbook {
                     Err(ZipError::FileNotFound) => {}
                     Err(err) => return Err(OxlsxError::Zip(err)),
                 }
+            }
+
+            // Resolve each raw hyperlink now that the sheet's rels are loaded.
+            // External links resolve `r:id` → rel target (the URL); internal
+            // `location`-only links keep an empty target and fabricate no rId.
+            for raw in raw_hyperlinks {
+                let target = raw
+                    .r_id
+                    .as_deref()
+                    .and_then(|rid| relation_target_for_id(&sheet_rels, rid))
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let cell = ws.cells.entry(raw.reference.clone()).or_insert_with(|| {
+                    Cell::parsed(
+                        raw.reference.clone(),
+                        Value::Empty,
+                        StyleId::default(),
+                        styles.clone(),
+                    )
+                });
+                cell.write_hyperlink = Some(Hyperlink {
+                    target,
+                    location: raw.location,
+                    tooltip: raw.tooltip,
+                    display: raw.display,
+                });
             }
 
             original_sheet_rels.push(sheet_rels);
@@ -800,11 +854,23 @@ impl Default for Workbook {
     }
 }
 
+/// A raw `<hyperlink>` element captured during SAX parsing, before its external
+/// `r:id` is resolved to a target via the sheet's relationships (which are
+/// loaded after the sheet body in [`Workbook::open`]).
+#[derive(Debug, Clone)]
+struct RawHyperlink {
+    reference: String,
+    r_id: Option<String>,
+    location: Option<String>,
+    tooltip: Option<String>,
+    display: Option<String>,
+}
+
 fn parse_sheet<R: BufRead>(
     reader: R,
     styles: Arc<StyleSheet>,
     shared_strings: &[String],
-) -> Result<Worksheet, OxlsxError> {
+) -> Result<(Worksheet, Vec<RawHyperlink>), OxlsxError> {
     let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
@@ -816,6 +882,7 @@ fn parse_sheet<R: BufRead>(
     let mut row_heights = HashMap::new();
     let mut freeze_panes = None;
     let mut in_sheet_view = false;
+    let mut raw_hyperlinks = Vec::new();
 
     loop {
         match xml.read_event_into(&mut buf)? {
@@ -877,6 +944,20 @@ fn parse_sheet<R: BufRead>(
                     merged_cells.push(range_ref);
                 }
             }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"hyperlink" => {
+                // `<hyperlink ref=".." r:id=".." location=".." tooltip=".."
+                // display=".."/>`. The qualified `r:id` is keyed as `r:id`
+                // (attr_value matches the full key, not the local name).
+                if let Some(reference) = attr_value(&e, b"ref")? {
+                    raw_hyperlinks.push(RawHyperlink {
+                        reference,
+                        r_id: attr_value(&e, b"r:id")?,
+                        location: attr_value(&e, b"location")?,
+                        tooltip: attr_value(&e, b"tooltip")?,
+                        display: attr_value(&e, b"display")?,
+                    });
+                }
+            }
             Event::Text(t) if decoder.in_value() => {
                 decoder.push_value_text(&t.unescape()?);
             }
@@ -910,20 +991,23 @@ fn parse_sheet<R: BufRead>(
         buf.clear();
     }
 
-    Ok(Worksheet {
-        name: String::new(),
-        cells,
-        merged_cells,
-        column_widths,
-        row_heights,
-        freeze_panes,
-        print_area: None,
-        print_title_rows: None,
-        print_title_cols: None,
-        defined_names: crate::DefinedNames::default(),
-        tables: Vec::new(),
-        table_retention: Vec::new(),
-    })
+    Ok((
+        Worksheet {
+            name: String::new(),
+            cells,
+            merged_cells,
+            column_widths,
+            row_heights,
+            freeze_panes,
+            print_area: None,
+            print_title_rows: None,
+            print_title_cols: None,
+            defined_names: crate::DefinedNames::default(),
+            tables: Vec::new(),
+            table_retention: Vec::new(),
+        },
+        raw_hyperlinks,
+    ))
 }
 
 fn is_frozen_pane(pane: &BytesStart<'_>) -> Result<bool, OxlsxError> {
@@ -1365,7 +1449,7 @@ mod tests {
     fn parses_sheet_cells_style_ids_and_values() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(
+        let (ws, _) = parse_sheet(
             Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
             styles,
             &["Hola".to_string()],
@@ -1391,7 +1475,7 @@ mod tests {
     fn style_accessors_use_stylesheet_via_style_id() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(
+        let (ws, _) = parse_sheet(
             Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
             styles,
             &["Hola".to_string()],
@@ -1407,7 +1491,7 @@ mod tests {
     fn cell_value_accessor_returns_parsed_value() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(
+        let (ws, _) = parse_sheet(
             Cursor::new(SAMPLE_SHEET_XML.as_bytes()),
             styles,
             &["Hola".to_string()],
@@ -1450,7 +1534,7 @@ mod tests {
     fn parses_inline_string_and_boolean_cells() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(
+        let (ws, _) = parse_sheet(
             Cursor::new(INLINE_STR_SHEET_XML.as_bytes()),
             styles,
             &["Hola".to_string()],
@@ -1477,6 +1561,7 @@ mod tests {
             write_font: None,
             write_fill: None,
             comment: None,
+            write_hyperlink: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -1488,6 +1573,7 @@ mod tests {
             write_font: None,
             write_fill: None,
             comment: None,
+            write_hyperlink: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -1499,6 +1585,7 @@ mod tests {
             write_font: None,
             write_fill: None,
             comment: None,
+            write_hyperlink: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -1510,6 +1597,7 @@ mod tests {
             write_font: None,
             write_fill: None,
             comment: None,
+            write_hyperlink: None,
         };
         assert_eq!(empty_cell.text(), None);
     }
@@ -1552,7 +1640,7 @@ mod tests {
     fn parse_sheet_converts_numeric_date_by_style() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(Cursor::new(DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
+        let (ws, _) = parse_sheet(Cursor::new(DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
 
         assert_eq!(
             ws.cell("B1").unwrap().value(),
@@ -1564,7 +1652,7 @@ mod tests {
     fn parse_sheet_keeps_non_date_numbers_unchanged() {
         let styles =
             Arc::new(StyleSheet::parse(Cursor::new(SAMPLE_STYLES_XML.as_bytes())).unwrap());
-        let ws = parse_sheet(Cursor::new(NON_DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
+        let (ws, _) = parse_sheet(Cursor::new(NON_DATE_SHEET_XML.as_bytes()), styles, &[]).unwrap();
 
         assert_eq!(ws.cell("C1").unwrap().value(), &Value::Number(42.0));
     }

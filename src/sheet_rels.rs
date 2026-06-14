@@ -184,6 +184,17 @@ pub fn upsert_hyperlink_rels(
     merged
 }
 
+/// Find the relationship target whose id matches `id`, if any.
+///
+/// Used by the reader to resolve a `<hyperlink r:id="...">` to its external
+/// `Target` (the URL, stored verbatim for `TargetMode="External"` rels).
+pub fn relation_target_for_id<'a>(entries: &'a [SheetRelEntry], id: &str) -> Option<&'a str> {
+    entries
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.target.as_str())
+}
+
 /// Find the relationship id whose target matches `target`, if any.
 pub fn relation_id_for_target<'a>(entries: &'a [SheetRelEntry], target: &str) -> Option<&'a str> {
     entries
@@ -305,9 +316,9 @@ fn id_for_type_or_next(
 mod tests {
     use super::{
         COMMENTS_REL_TYPE, HYPERLINK_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, VML_DRAWING_REL_TYPE,
-        parse_sheet_rels, relation_id_for_target, relation_id_for_type, relation_target_for_type,
-        relation_targets_for_type, resolve_sheet_target, sheet_rels_path, upsert_comment_rels,
-        upsert_hyperlink_rels, upsert_table_rels, write_sheet_rels,
+        parse_sheet_rels, relation_id_for_target, relation_id_for_type, relation_target_for_id,
+        relation_target_for_type, relation_targets_for_type, resolve_sheet_target, sheet_rels_path,
+        upsert_comment_rels, upsert_hyperlink_rels, upsert_table_rels, write_sheet_rels,
     };
     use std::io::Cursor;
 
@@ -654,6 +665,34 @@ mod tests {
             let entry = merged.iter().find(|e| e.target == target).unwrap();
             assert_eq!(entry.target_mode.as_deref(), Some("External"));
         }
+    }
+
+    #[test]
+    fn relation_target_for_id_resolves_hyperlink_url() {
+        let entries = vec![
+            SheetRelEntry {
+                id: "rId1".to_string(),
+                rel_type: COMMENTS_REL_TYPE.to_string(),
+                target: "../comments1.xml".to_string(),
+                target_mode: None,
+            },
+            SheetRelEntry {
+                id: "rId2".to_string(),
+                rel_type: HYPERLINK_REL_TYPE.to_string(),
+                target: "https://example.com".to_string(),
+                target_mode: Some("External".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            relation_target_for_id(&entries, "rId2"),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            relation_target_for_id(&entries, "rId1"),
+            Some("../comments1.xml")
+        );
+        assert_eq!(relation_target_for_id(&entries, "rId99"), None);
     }
 
     #[test]

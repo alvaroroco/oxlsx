@@ -2469,3 +2469,183 @@ fn existing_rels_remain_byte_identical_without_hyperlinks() {
 
     fs::remove_file(path).ok();
 }
+
+// --- Hyperlink Slice 2: reader/writer round-trip + RMW (Scenarios 1-4, 6) ---
+
+/// Scenario 1: open the openpyxl-authored fixture and read the external
+/// hyperlink attached to A1, resolving `r:id` → external rel target.
+#[test]
+fn hyperlink_read_from_existing_workbook() {
+    let wb = Workbook::open("samples/hyperlinks.xlsx").unwrap();
+    let ws = wb.active().unwrap();
+    let hyperlink = ws.cell("A1").unwrap().hyperlink().unwrap();
+    assert_eq!(hyperlink.target, "https://example.com");
+}
+
+/// Scenario 2: author an external hyperlink on a new workbook, save, reopen.
+/// The target round-trips, `<hyperlinks>` is emitted AFTER `<mergeCells>`, and
+/// the sheet rel carries `TargetMode="External"`.
+#[test]
+fn hyperlink_write_new_workbook() {
+    let path = temp_path("oxlsx_hyperlink_write_new.xlsx");
+    {
+        let mut wb = Workbook::new();
+        let ws = wb.active_mut().unwrap();
+        ws.set_cell("A1", "link");
+        ws.merge_cells("C1:D1");
+        ws.set_cell_hyperlink("A1", "http://rust-lang.org");
+        wb.save(&path).unwrap();
+    }
+
+    // Target round-trips through a reopen.
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(
+        wb2.active()
+            .unwrap()
+            .cell("A1")
+            .unwrap()
+            .hyperlink()
+            .unwrap()
+            .target,
+        "http://rust-lang.org"
+    );
+
+    // `<hyperlinks>` must come strictly AFTER `<mergeCells>` (CT_Worksheet order;
+    // misplacement triggers Excel repair).
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    let merge_pos = sheet_xml.find("<mergeCells").expect("mergeCells present");
+    let hyperlinks_pos = sheet_xml.find("<hyperlinks").expect("hyperlinks present");
+    assert!(
+        merge_pos < hyperlinks_pos,
+        "<hyperlinks> must be emitted after <mergeCells>: {sheet_xml}"
+    );
+
+    // External rel present with TargetMode="External".
+    let rels = read_zip_entry(&path, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(
+        rels.contains("TargetMode=\"External\""),
+        "external hyperlink rel must carry TargetMode=External: {rels}"
+    );
+    assert!(rels.contains("http://rust-lang.org"), "rel target: {rels}");
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 3: RMW preserves an existing external hyperlink and its
+/// `tooltip`/`display`, plus the unrelated external rel, when an unrelated cell
+/// is edited.
+#[test]
+fn hyperlink_rmw_preserves_existing() {
+    let path = temp_path("oxlsx_hyperlink_rmw_preserve.xlsx");
+    fs::copy("samples/hyperlinks.xlsx", &path).unwrap();
+
+    {
+        let mut wb = Workbook::open(&path).unwrap();
+        wb.active_mut().unwrap().set_cell("B2", "unrelated edit");
+        wb.save(&path).unwrap();
+    }
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let ws = wb2.active().unwrap();
+    let hyperlink = ws.cell("A1").unwrap().hyperlink().unwrap();
+    assert_eq!(hyperlink.target, "https://example.com");
+    assert_eq!(hyperlink.tooltip.as_deref(), Some("Example"));
+    assert_eq!(hyperlink.display.as_deref(), Some("Example Site"));
+
+    let rels = read_zip_entry(&path, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(
+        rels.contains("TargetMode=\"External\"") && rels.contains("https://example.com"),
+        "unrelated external hyperlink rel preserved on RMW: {rels}"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 4: a sheet holding a hyperlink AND a comment AND a table must
+/// round-trip with unique, non-colliding rIds.
+#[test]
+fn hyperlink_coexists_with_comments_and_tables() {
+    let path = temp_path("oxlsx_hyperlink_coexist.xlsx");
+    {
+        let mut wb = Workbook::new();
+        let ws = wb.active_mut().unwrap();
+        ws.set_cell("A1", "header");
+        ws.set_cell("B1", "h2");
+        ws.set_cell("A2", "r1");
+        ws.set_cell("B2", "r2");
+        ws.set_cell("A3", "r3");
+        ws.set_cell("B3", "r4");
+        ws.set_cell_comment(
+            "A1",
+            Comment {
+                text: "note".to_string(),
+                author: "Al".to_string(),
+            },
+        );
+        ws.add_table(Table::new("CoTable", "A1:B3")).unwrap();
+        ws.set_cell("A4", "link");
+        ws.set_cell_hyperlink("A4", "https://example.org");
+        wb.save(&path).unwrap();
+    }
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let ws = wb2.active().unwrap();
+    assert_eq!(
+        ws.cell("A4").unwrap().hyperlink().unwrap().target,
+        "https://example.org"
+    );
+    assert!(
+        ws.cell("A1").unwrap().comment().is_some(),
+        "comment round-trips"
+    );
+    assert_eq!(ws.tables().len(), 1, "table round-trips");
+
+    // Every sheet rId must be unique (hyperlink + comment + vml + table).
+    let rels = read_zip_entry(&path, "xl/worksheets/_rels/sheet1.xml.rels");
+    let ids = relationship_ids(&rels);
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "duplicate relationship Id found: {rels}"
+    );
+    assert!(
+        rels.contains("TargetMode=\"External\""),
+        "hyperlink rel present: {rels}"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 6: an internal `location`-only hyperlink (no rId) survives RMW
+/// verbatim — no rId is fabricated and no external target is invented.
+#[test]
+fn internal_location_hyperlink_preserved_on_rmw() {
+    let path = temp_path("oxlsx_hyperlink_internal_rmw.xlsx");
+    fs::copy("samples/hyperlinks.xlsx", &path).unwrap();
+
+    {
+        let mut wb = Workbook::open(&path).unwrap();
+        wb.active_mut().unwrap().set_cell("E5", "unrelated");
+        wb.save(&path).unwrap();
+    }
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let ws = wb2.active().unwrap();
+    let hyperlink = ws.cell("B1").unwrap().hyperlink().unwrap();
+    assert_eq!(hyperlink.location.as_deref(), Some("Sheet!A1"));
+    assert!(
+        hyperlink.target.is_empty(),
+        "internal hyperlink must not fabricate an external target/rId"
+    );
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains("location=\"Sheet!A1\""),
+        "internal location hyperlink preserved: {sheet_xml}"
+    );
+
+    fs::remove_file(path).ok();
+}

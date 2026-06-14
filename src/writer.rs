@@ -1,7 +1,7 @@
 use crate::styles::CellXf;
 use crate::{
-    Color, Comment, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet, defined_names,
-    sheet_rels,
+    Color, Comment, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value, Workbook, Worksheet,
+    defined_names, sheet_rels,
 };
 use chrono::NaiveDate;
 use indexmap::IndexMap;
@@ -351,6 +351,57 @@ fn write_xlsx_to_path(
             }
         }
 
+        // Collect emittable hyperlinks in deterministic (row, col) order.
+        // External links (non-empty target) allocate a rel + `r:id` AFTER
+        // comments/tables (via `upsert_hyperlink_rels` → `next_rel_id`), so
+        // rIds never collide; internal `location`-only links carry `location`
+        // and fabricate no rId.
+        let mut hyperlink_cells = ws
+            .cells()
+            .iter()
+            .filter_map(|(reference, cell)| {
+                cell.hyperlink().and_then(|hyperlink| {
+                    (!hyperlink.target.is_empty() || hyperlink.location.is_some())
+                        .then_some((reference.as_str(), hyperlink))
+                })
+            })
+            .collect::<Vec<_>>();
+        hyperlink_cells.sort_by_key(|(reference, _)| cell_sort_key(reference));
+
+        let external_targets = hyperlink_cells
+            .iter()
+            .filter(|(_, hyperlink)| !hyperlink.target.is_empty())
+            .map(|(_, hyperlink)| hyperlink.target.as_str())
+            .collect::<Vec<_>>();
+        let has_external_hyperlinks = !external_targets.is_empty();
+        if has_external_hyperlinks {
+            sheet_rels_entries =
+                sheet_rels::upsert_hyperlink_rels(&sheet_rels_entries, &external_targets);
+        }
+        // After the upsert, the only HYPERLINK_REL_TYPE entries are the freshly
+        // allocated ones, in `external_targets` order.
+        let hyperlink_rids = sheet_rels_entries
+            .iter()
+            .filter(|entry| entry.rel_type == sheet_rels::HYPERLINK_REL_TYPE)
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        let mut next_hyperlink_rid = hyperlink_rids.iter();
+        let hyperlink_refs = hyperlink_cells
+            .iter()
+            .map(|(reference, hyperlink)| {
+                let rel_id = if hyperlink.target.is_empty() {
+                    None
+                } else {
+                    next_hyperlink_rid.next().map(String::as_str)
+                };
+                HyperlinkRef {
+                    reference,
+                    hyperlink,
+                    rel_id,
+                }
+            })
+            .collect::<Vec<_>>();
+
         write_sheet_xml(
             &mut zip,
             options,
@@ -361,6 +412,7 @@ fn write_xlsx_to_path(
             &SheetRelRefs {
                 legacy_drawing_rid: legacy_drawing_rid.as_deref(),
                 table_rids: &table_rids,
+                hyperlinks: &hyperlink_refs,
             },
         )?;
         written_entries.insert(format!("xl/worksheets/sheet{}.xml", idx + 1));
@@ -405,7 +457,7 @@ fn write_xlsx_to_path(
             written_entries.insert(part);
         }
 
-        if has_comments(ws) || !sheet_part_numbers.is_empty() {
+        if has_comments(ws) || !sheet_part_numbers.is_empty() || has_external_hyperlinks {
             let sheet_rels_xml = sheet_rels::write_sheet_rels(&sheet_rels_entries)?;
             let rels_part = format!("xl/worksheets/_rels/sheet{}.xml.rels", idx + 1);
             write_zip_entry(&mut zip, options, rels_part.as_str(), sheet_rels_xml)?;
@@ -1074,6 +1126,15 @@ fn write_shared_strings_xml(
 struct SheetRelRefs<'a> {
     legacy_drawing_rid: Option<&'a str>,
     table_rids: &'a [String],
+    hyperlinks: &'a [HyperlinkRef<'a>],
+}
+
+/// A single `<hyperlink>` to emit, in document order. External links carry a
+/// resolved `rel_id` (`r:id`); internal `location`-only links carry `None`.
+struct HyperlinkRef<'a> {
+    reference: &'a str,
+    hyperlink: &'a Hyperlink,
+    rel_id: Option<&'a str>,
 }
 
 fn write_sheet_xml(
@@ -1088,13 +1149,17 @@ fn write_sheet_xml(
     let SheetRelRefs {
         legacy_drawing_rid,
         table_rids,
+        hyperlinks,
     } = *rel_refs;
     let mut xml = xml_writer_with_decl()?;
     let mut worksheet_attrs = vec![(
         "xmlns",
         "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     )];
-    if legacy_drawing_rid.is_some() || !table_rids.is_empty() {
+    let needs_rel_namespace = legacy_drawing_rid.is_some()
+        || !table_rids.is_empty()
+        || hyperlinks.iter().any(|link| link.rel_id.is_some());
+    if needs_rel_namespace {
         worksheet_attrs.push((
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -1207,6 +1272,30 @@ fn write_sheet_xml(
             write_empty(&mut xml, "mergeCell", &[("ref", range_ref.as_str())])?;
         }
         write_end(&mut xml, "mergeCells")?;
+    }
+
+    // `<hyperlinks>` MUST follow `<mergeCells>` and precede `<pageMargins>` /
+    // `<legacyDrawing>` per CT_Worksheet ordering, or Excel flags the file for
+    // repair.
+    if !hyperlinks.is_empty() {
+        write_start(&mut xml, "hyperlinks", &[])?;
+        for link in hyperlinks {
+            let mut attrs: Vec<(&str, &str)> = vec![("ref", link.reference)];
+            if let Some(rel_id) = link.rel_id {
+                attrs.push(("r:id", rel_id));
+            }
+            if let Some(location) = link.hyperlink.location.as_deref() {
+                attrs.push(("location", location));
+            }
+            if let Some(tooltip) = link.hyperlink.tooltip.as_deref() {
+                attrs.push(("tooltip", tooltip));
+            }
+            if let Some(display) = link.hyperlink.display.as_deref() {
+                attrs.push(("display", display));
+            }
+            write_empty(&mut xml, "hyperlink", &attrs)?;
+        }
+        write_end(&mut xml, "hyperlinks")?;
     }
 
     if let Some(rel_id) = legacy_drawing_rid {
