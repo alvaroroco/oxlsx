@@ -2,6 +2,7 @@ pub mod comments;
 pub(crate) mod coords;
 pub(crate) mod defined_names;
 pub mod error;
+pub mod hyperlink;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod reader;
@@ -17,6 +18,7 @@ pub(crate) mod xml;
 pub use comments::Comment;
 pub use defined_names::{DefinedName, DefinedNames};
 pub use error::OxlsxError;
+pub use hyperlink::Hyperlink;
 pub use reader::Value;
 pub use reader::{Cell, Workbook, Worksheet};
 pub use readonly::{ReadonlyWorkbook, ReadonlyWorksheet, RowIter};

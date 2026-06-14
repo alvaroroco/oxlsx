@@ -1098,3 +1098,49 @@ def test_table_delete_missing_raises_keyerror():
     ws = wb.active
     with pytest.raises(KeyError):
         del ws.tables["DoesNotExist"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 12a — Hyperlinks parity (scenarios 7, 8)
+#
+# Mirrors openpyxl.worksheet.hyperlink.Hyperlink: a cell exposes `.hyperlink`
+# (an object with `.target`/`.location`/`.tooltip`/`.display`, or None).
+# openpyxl authors hyperlinks via `cell.hyperlink = "https://..."`; because
+# oxlsx's PyCell is a value snapshot, the write path is a worksheet method
+# (`ws.set_cell_hyperlink`), mirroring `ws.set_cell_comment`.
+# ---------------------------------------------------------------------------
+
+
+def test_hyperlink_read(load_wb):
+    # samples/hyperlinks.xlsx A1 → external https://example.com with tooltip +
+    # display. Both engines must expose the same resolved Hyperlink shape.
+    wb = load_wb("samples/hyperlinks.xlsx")
+    link = wb.active["A1"].hyperlink
+    assert link is not None
+    assert link.target == "https://example.com"
+    assert link.tooltip == "Example"
+    assert link.display == "Example Site"
+
+
+def test_hyperlink_round_trip(new_wb, load_wb):
+    wb, save = new_wb
+    ws = wb.active
+    target = "https://example.com"
+
+    if hasattr(ws, "set_cell_hyperlink"):
+        ws.set_cell_hyperlink("A1", target)
+    else:
+        ws["A1"].hyperlink = target
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        save(path)
+        # Cross-engine reopen (incl. oxlsx-write → openpyxl-read) must not
+        # repair and must preserve the external target.
+        wb2 = load_wb(path)
+        link = wb2.active["A1"].hyperlink
+        assert link is not None
+        assert link.target == target
+    finally:
+        os.unlink(path)
