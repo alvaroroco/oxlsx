@@ -10,6 +10,8 @@ pub enum OxlsxError {
     InvalidFormat(String),
     #[error("missing part: {0}")]
     MissingPart(String),
+    #[error("duplicate table displayName: {0}")]
+    DuplicateTableName(String),
 }
 
 #[cfg(test)]

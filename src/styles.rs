@@ -1,4 +1,5 @@
 use crate::OxlsxError;
+use crate::xml::attr_value;
 use quick_xml::Reader;
 use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
@@ -296,18 +297,6 @@ impl StyleSheet {
             .map(|(num_fmt_id, format_code)| (*num_fmt_id, format_code.clone()))
             .collect()
     }
-}
-
-fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxError> {
-    for attr in e.attributes().with_checks(false) {
-        let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
-        if attr.key.as_ref() == key {
-            let val = attr.unescape_value()?.into_owned();
-            return Ok(Some(val));
-        }
-    }
-
-    Ok(None)
 }
 
 fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
