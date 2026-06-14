@@ -1,12 +1,30 @@
 # oxlsx
 
-A high-performance Rust library for reading and writing `.xlsx` files with full formatting support — designed as an **openpyxl equivalent in Rust**, with Python bindings (PyO3) planned.
+A high-performance Rust library for reading and writing `.xlsx` files with full formatting support — designed as an **openpyxl equivalent in Rust**, with Python bindings (PyO3).
 
-> **5–10x faster than openpyxl** on write operations. Read benchmarks improve further with lazy loading (see Roadmap).
+> **5–10x faster than openpyxl** on write operations. Streaming reads via `open_readonly()`.
 
 ## Status
 
-Active development — Phases 1–13 complete. API stabilizing.
+**v0.1.0 released** — feature-complete (phases 1–13). First stable API.
+
+## Install
+
+### Rust
+```toml
+# Cargo.toml
+[dependencies]
+oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.1.0" }
+```
+> Not yet on crates.io (Phase 14).
+
+### Python (build from source via maturin)
+```bash
+pip install maturin
+maturin develop --features python   # or: maturin build --features python
+```
+> PyPI wheels are planned for Phase 14.
+
 
 | Phase | Scope | Status |
 |-------|-------|--------|
@@ -133,11 +151,11 @@ Measured against openpyxl 3.1.5 on the same 10k-row file (5 columns, mixed types
 
 | Operation | openpyxl | oxlsx | Notes |
 |-----------|:--------:|:-----:|-------|
-| Metadata only | 1.1ms | 21ms | oxlsx loads eagerly — `open_readonly()` in Phase 5 fixes this |
+| Metadata only | 1.1ms | 21ms | eager `open()`; use `open_readonly()` for ~1ms streaming metadata |
 | Iterate all cells | 144.7ms | 25.5ms | **5.7x faster** |
 | Style resolution | — | **1.5ns** | `Arc<StyleSheet>` lookup |
 
-> Read metadata will improve dramatically in Phase 5 (`open_readonly()` streaming reader).
+> Eager `open()` loads metadata in ~21ms; `open_readonly()` streams it lazily (~1ms) for large files.
 
 Run benchmarks yourself:
 ```bash
