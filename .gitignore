@@ -1,1 +1,14 @@
 /target
+
+# OS / editor cruft
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local scratch / working notes (not part of the repo)
+.atl/
+exploration.md
+.pr-body-*.md
