@@ -126,14 +126,12 @@ pub fn upsert_table_rels(existing: &[SheetRelEntry], table_targets: &[&str]) -> 
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut next = next_rel_id(&merged);
-    for target in table_targets {
+    for (next, target) in (next_rel_id(&merged)..).zip(table_targets.iter()) {
         merged.push(SheetRelEntry {
             id: format!("rId{next}"),
             rel_type: TABLE_REL_TYPE.to_string(),
             target: (*target).to_string(),
         });
-        next += 1;
     }
 
     merged
