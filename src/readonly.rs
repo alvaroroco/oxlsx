@@ -1,6 +1,7 @@
 use crate::coords::{column_index, column_name};
 use crate::reader::CellDecoder;
 use crate::workbook_rels::parse_sheet_refs;
+use crate::xml::attr_value;
 use crate::{Cell, OxlsxError, SharedStrings, StyleSheet};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -441,17 +442,6 @@ fn row_number(cell_start: &BytesStart<'_>) -> Option<usize> {
         .ok()
         .flatten()
         .and_then(|r| r.parse::<usize>().ok())
-}
-
-fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxError> {
-    for attr in e.attributes().with_checks(false) {
-        let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
-        if attr.key.as_ref() == key {
-            return Ok(Some(attr.unescape_value()?.into_owned()));
-        }
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]

@@ -1,5 +1,13 @@
-use crate::coords::{column_index, rc_to_a1};
+use crate::comments::{Comment, parse_comments_xml};
+use crate::coords::{column_index, make_absolute_range, rc_to_a1};
+use crate::defined_names::parse_workbook_defined_names;
+use crate::sheet_rels::{
+    COMMENTS_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, parse_sheet_rels, relation_target_for_type,
+    relation_targets_for_type, resolve_sheet_target, sheet_rels_path,
+};
+use crate::table::{RawTable, Table, derive_columns_from_header, parse_table_xml};
 use crate::workbook_rels::parse_sheet_refs;
+use crate::xml::attr_value;
 use crate::{Fill, Font, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet};
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
@@ -66,6 +74,7 @@ pub struct Cell {
     styles: Arc<StyleSheet>,
     pub(crate) write_font: Option<Font>,
     pub(crate) write_fill: Option<Fill>,
+    pub(crate) comment: Option<Comment>,
 }
 
 impl Cell {
@@ -96,6 +105,10 @@ impl Cell {
         }
     }
 
+    pub fn comment(&self) -> Option<&Comment> {
+        self.comment.as_ref()
+    }
+
     pub(crate) fn parsed(
         reference: String,
         value: Value,
@@ -109,6 +122,7 @@ impl Cell {
             styles,
             write_font: None,
             write_fill: None,
+            comment: None,
         }
     }
 
@@ -124,6 +138,19 @@ pub struct Worksheet {
     pub(crate) merged_cells: Vec<String>,
     pub(crate) column_widths: HashMap<u32, f64>,
     pub(crate) row_heights: HashMap<u32, f64>,
+    pub(crate) freeze_panes: Option<String>,
+    pub(crate) print_area: Option<String>,
+    pub(crate) print_title_rows: Option<String>,
+    pub(crate) print_title_cols: Option<String>,
+    defined_names: crate::DefinedNames,
+    pub(crate) tables: Vec<Table>,
+    /// Retained raw `tableN.xml` bytes, index-aligned 1:1 with `tables`.
+    ///
+    /// `Some` when the table was read from a source workbook (verbatim
+    /// candidate); `None` for tables created via [`Worksheet::add_table`].
+    /// Kept in lock-step with `tables` by every mutation (`add_table`,
+    /// `remove_table`).
+    pub(crate) table_retention: Vec<Option<RawTable>>,
 }
 
 impl Worksheet {
@@ -134,11 +161,133 @@ impl Worksheet {
             merged_cells: Vec::new(),
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
+            freeze_panes: None,
+            print_area: None,
+            print_title_rows: None,
+            print_title_cols: None,
+            defined_names: crate::DefinedNames::default(),
+            tables: Vec::new(),
+            table_retention: Vec::new(),
         }
     }
 
     pub fn title(&self) -> &str {
         &self.name
+    }
+
+    /// Sheet-local named ranges (`<definedName>` carrying this sheet's `localSheetId`).
+    ///
+    /// Separate from the workbook-global collection ([`Workbook::defined_names`]);
+    /// the same name MAY exist in both scopes (openpyxl parity).
+    pub fn defined_names(&self) -> &crate::DefinedNames {
+        &self.defined_names
+    }
+
+    /// Mutable access to this sheet's local named ranges.
+    ///
+    /// `localSheetId` is never stored: it is computed from the worksheet's live
+    /// position at serialize time.
+    pub fn defined_names_mut(&mut self) -> &mut crate::DefinedNames {
+        &mut self.defined_names
+    }
+
+    /// Excel tables (`<table>` parts) defined on this worksheet.
+    ///
+    /// Mirrors openpyxl's `ws.tables`; lookup by `display_name` is done by the
+    /// caller (the Python layer exposes the dict-like interface).
+    pub fn tables(&self) -> &[Table] {
+        &self.tables
+    }
+
+    /// Mutable access to a table by `display_name` (case-insensitive lookup,
+    /// matching the workbook-wide `displayName` uniqueness rule). Returns
+    /// `None` if no table with that name exists on this worksheet.
+    ///
+    /// Acquiring this mutable reference conservatively marks the table
+    /// **dirty**: on save it takes the model serialization path, discarding any
+    /// retained verbatim bytes (and the unmodeled features they carried). Use
+    /// [`tables`](Self::tables) for read-only access that preserves verbatim
+    /// retention.
+    pub fn table_mut(&mut self, display_name: &str) -> Option<&mut Table> {
+        let idx = self
+            .tables
+            .iter()
+            .position(|table| table.display_name.eq_ignore_ascii_case(display_name))?;
+        if let Some(Some(raw)) = self.table_retention.get_mut(idx) {
+            raw.dirty = true;
+        }
+        Some(&mut self.tables[idx])
+    }
+
+    /// Remove a table by `display_name` (case-insensitive), returning the
+    /// removed [`Table`] or `None` if no such table exists.
+    ///
+    /// Drops both the table and its retention slot, keeping `tables` and
+    /// `table_retention` index-aligned. On save the removed table's part, sheet
+    /// rel, `<tablePart>` entry, and content-type override all disappear.
+    pub fn remove_table(&mut self, display_name: &str) -> Option<Table> {
+        let idx = self
+            .tables
+            .iter()
+            .position(|table| table.display_name.eq_ignore_ascii_case(display_name))?;
+        if idx < self.table_retention.len() {
+            self.table_retention.remove(idx);
+        }
+        Some(self.tables.remove(idx))
+    }
+
+    /// Add an Excel table to this worksheet, mirroring openpyxl's
+    /// `ws.add_table`.
+    ///
+    /// When `table.columns` is empty, columns are derived from the header row
+    /// of `table.ref_range` (ids `1..=N`, names from the header cells). When
+    /// `table.name` is empty it defaults to `table.display_name`.
+    ///
+    /// Add a table to this worksheet.
+    ///
+    /// Returns [`OxlsxError::DuplicateTableName`] if a table with the same
+    /// `display_name` (case-insensitive) already exists on THIS worksheet; no
+    /// state is mutated on rejection. Workbook-wide uniqueness is enforced at
+    /// save time.
+    ///
+    /// Returns [`OxlsxError::InvalidFormat`] if the table's `ref_range` does not
+    /// parse to at least one column.
+    ///
+    /// A table added this way has no retained source bytes, so it is always
+    /// serialized from the model on save (there is nothing to preserve
+    /// verbatim). For tables read from an existing workbook, unmodeled features
+    /// survive RMW unless the table is mutated — see the [`crate::table`] module
+    /// doc.
+    pub fn add_table(&mut self, mut table: Table) -> Result<(), OxlsxError> {
+        // FIX 6: Case-insensitive same-sheet check.
+        let lower = table.display_name.to_ascii_lowercase();
+        if self
+            .tables
+            .iter()
+            .any(|existing| existing.display_name.to_ascii_lowercase() == lower)
+        {
+            return Err(OxlsxError::DuplicateTableName(table.display_name));
+        }
+
+        // FIX 2: Validate that the ref_range has at least one column.
+        if !crate::table::validate_table_ref(&table.ref_range) {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "table ref_range {:?} does not parse to at least one column",
+                table.ref_range
+            )));
+        }
+
+        if table.name.is_empty() {
+            table.name = table.display_name.clone();
+        }
+        if table.columns.is_empty() {
+            table.columns = derive_columns_from_header(self, &table.ref_range);
+        }
+
+        self.tables.push(table);
+        // New tables have no source bytes → model serialization path.
+        self.table_retention.push(None);
+        Ok(())
     }
 
     pub fn cell(&self, reference: &str) -> Option<&Cell> {
@@ -150,48 +299,23 @@ impl Worksheet {
     }
 
     pub fn set_cell(&mut self, reference: &str, value: impl Into<Value>) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.value = value.into();
     }
 
     pub fn set_cell_font(&mut self, reference: &str, font: Font) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.write_font = Some(font);
     }
 
     pub fn set_cell_fill(&mut self, reference: &str, fill: Fill) {
-        let cell = self
-            .cells
-            .entry(reference.to_string())
-            .or_insert_with(|| Cell {
-                reference: reference.to_string(),
-                value: Value::Empty,
-                style_id: StyleId::default(),
-                styles: Arc::new(StyleSheet::default()),
-                write_font: None,
-                write_fill: None,
-            });
+        let cell = self.ensure_cell_mut(reference);
         cell.write_fill = Some(fill);
+    }
+
+    pub fn set_cell_comment(&mut self, reference: &str, comment: Comment) {
+        let cell = self.ensure_cell_mut(reference);
+        cell.comment = Some(comment);
     }
 
     pub fn merge_cells(&mut self, range: &str) {
@@ -211,6 +335,54 @@ impl Worksheet {
 
     pub fn row_height(&mut self, row: u32, height: f64) {
         self.row_heights.insert(row, height);
+    }
+
+    pub fn freeze_panes(&self) -> Option<&str> {
+        self.freeze_panes.as_deref()
+    }
+
+    pub fn set_freeze_panes(&mut self, value: Option<&str>) {
+        self.freeze_panes = normalize_freeze_panes(value);
+    }
+
+    pub fn print_area(&self) -> Option<String> {
+        self.print_area.as_ref().map(|area| {
+            // Return qualified form like openpyxl: 'Sheet'!$A$1:$D$4
+            let quoted_title = format!("'{}'", self.name.replace('\'', "''"));
+            if area.contains(',') {
+                // Multi-range: qualify each segment
+                area.split(',')
+                    .map(|segment| format!("{quoted_title}!{}", segment.trim()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                format!("{quoted_title}!{area}")
+            }
+        })
+    }
+
+    pub(crate) fn print_area_bare(&self) -> Option<&str> {
+        self.print_area.as_deref()
+    }
+
+    pub fn set_print_area(&mut self, value: Option<&str>) {
+        self.print_area = normalize_print_setting(value);
+    }
+
+    pub fn print_title_rows(&self) -> Option<&str> {
+        self.print_title_rows.as_deref()
+    }
+
+    pub fn set_print_title_rows(&mut self, value: Option<&str>) {
+        self.print_title_rows = normalize_print_setting(value);
+    }
+
+    pub fn print_title_cols(&self) -> Option<&str> {
+        self.print_title_cols.as_deref()
+    }
+
+    pub fn set_print_title_cols(&mut self, value: Option<&str>) {
+        self.print_title_cols = normalize_print_setting(value);
     }
 
     pub fn max_row(&self) -> u32 {
@@ -347,6 +519,20 @@ impl Worksheet {
             Some((min_col, max_col, min_row, max_row))
         }
     }
+
+    fn ensure_cell_mut(&mut self, reference: &str) -> &mut Cell {
+        self.cells
+            .entry(reference.to_string())
+            .or_insert_with(|| Cell {
+                reference: reference.to_string(),
+                value: Value::Empty,
+                style_id: StyleId::default(),
+                styles: Arc::new(StyleSheet::default()),
+                write_font: None,
+                write_fill: None,
+                comment: None,
+            })
+    }
 }
 
 fn parse_a1(reference: &str) -> Option<(u32, u32)> {
@@ -369,6 +555,9 @@ pub struct Workbook {
     active_index: usize,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) original_styles: Option<Arc<StyleSheet>>,
+    pub(crate) original_sheet_rels: Vec<Vec<SheetRelEntry>>,
+    pub(crate) extra_defined_names: Vec<String>,
+    defined_names: crate::DefinedNames,
 }
 
 impl Workbook {
@@ -378,6 +567,9 @@ impl Workbook {
             active_index: 0,
             source_path: None,
             original_styles: None,
+            original_sheet_rels: vec![Vec::new()],
+            extra_defined_names: Vec::new(),
+            defined_names: crate::DefinedNames::default(),
         }
     }
 
@@ -404,7 +596,14 @@ impl Workbook {
             Err(e) => return Err(OxlsxError::Zip(e)),
         };
 
-        let (sheet_refs, active_index) = {
+        let (
+            sheet_refs,
+            active_index,
+            print_defined_names,
+            sheet_local_defined_names,
+            defined_names,
+            extra_defined_names,
+        ) = {
             let workbook_xml = {
                 let mut wb_file = archive
                     .by_name("xl/workbook.xml")
@@ -424,20 +623,109 @@ impl Workbook {
                 bytes
             };
 
-            parse_sheet_refs(
-                BufReader::new(Cursor::new(workbook_xml)),
+            let (sheet_refs, active_index) = parse_sheet_refs(
+                BufReader::new(Cursor::new(workbook_xml.clone())),
                 BufReader::new(Cursor::new(rels_xml)),
-            )?
+            )?;
+            let (
+                print_defined_names,
+                sheet_local_defined_names,
+                defined_names,
+                extra_defined_names,
+            ) = parse_workbook_defined_names(
+                BufReader::new(Cursor::new(workbook_xml)),
+                sheet_refs.len(),
+            )?;
+
+            (
+                sheet_refs,
+                active_index,
+                print_defined_names,
+                sheet_local_defined_names,
+                defined_names,
+                extra_defined_names,
+            )
         };
 
         let mut sheets = Vec::with_capacity(sheet_refs.len());
+        let mut original_sheet_rels = Vec::with_capacity(sheet_refs.len());
         for sheet_ref in &sheet_refs {
             let sheet_file = archive
                 .by_name(&sheet_ref.zip_path)
                 .map_err(|_| OxlsxError::MissingPart(sheet_ref.zip_path.clone()))?;
             let mut ws = parse_sheet(BufReader::new(sheet_file), styles.clone(), &shared_strings)?;
             ws.name = sheet_ref.name.clone();
+
+            let rels_path = sheet_rels_path(&sheet_ref.zip_path);
+            let sheet_rels = match archive.by_name(&rels_path) {
+                Ok(rels_file) => parse_sheet_rels(BufReader::new(rels_file))?,
+                Err(ZipError::FileNotFound) => Vec::new(),
+                Err(err) => return Err(OxlsxError::Zip(err)),
+            };
+
+            if let Some(comment_target) = relation_target_for_type(&sheet_rels, COMMENTS_REL_TYPE) {
+                let comments_path = resolve_sheet_target(&sheet_ref.zip_path, comment_target);
+                let parsed_comments = match archive.by_name(&comments_path) {
+                    Ok(comments_file) => parse_comments_xml(BufReader::new(comments_file))?,
+                    Err(ZipError::FileNotFound) => HashMap::new(),
+                    Err(err) => return Err(OxlsxError::Zip(err)),
+                };
+
+                for (reference, comment) in parsed_comments {
+                    let cell = ws.cells.entry(reference.clone()).or_insert_with(|| {
+                        Cell::parsed(
+                            reference.clone(),
+                            Value::Empty,
+                            StyleId::default(),
+                            styles.clone(),
+                        )
+                    });
+                    cell.comment = Some(comment);
+                }
+            }
+
+            for table_target in relation_targets_for_type(&sheet_rels, TABLE_REL_TYPE) {
+                let table_path = resolve_sheet_target(&sheet_ref.zip_path, table_target);
+                match archive.by_name(&table_path) {
+                    Ok(mut table_file) => {
+                        // Retain the exact bytes for verbatim re-emission, then
+                        // parse the thin model from the same bytes via a Cursor.
+                        let mut bytes = Vec::new();
+                        table_file.read_to_end(&mut bytes)?;
+                        let table = parse_table_xml(Cursor::new(bytes.as_slice()))?;
+                        ws.tables.push(table);
+                        ws.table_retention.push(Some(RawTable {
+                            bytes,
+                            dirty: false,
+                        }));
+                    }
+                    Err(ZipError::FileNotFound) => {}
+                    Err(err) => return Err(OxlsxError::Zip(err)),
+                }
+            }
+
+            original_sheet_rels.push(sheet_rels);
             sheets.push(ws);
+        }
+
+        for (sheet_idx, value) in print_defined_names.print_areas {
+            if let Some(sheet) = sheets.get_mut(sheet_idx) {
+                sheet.print_area = normalize_print_setting(Some(value.as_str()));
+            }
+        }
+        for (sheet_idx, rows, cols) in print_defined_names.print_titles {
+            if let Some(sheet) = sheets.get_mut(sheet_idx) {
+                sheet.print_title_rows = rows.and_then(|row| normalize_print_setting(Some(&row)));
+                sheet.print_title_cols = cols.and_then(|col| normalize_print_setting(Some(&col)));
+            }
+        }
+
+        // Attach sheet-local named ranges to their owning worksheet by index.
+        // The promotion predicate already validated the index is in range.
+        for (sheet_idx, defined_name) in sheet_local_defined_names {
+            if let Some(sheet) = sheets.get_mut(sheet_idx) {
+                sheet.defined_names_mut().insert_parsed(defined_name);
+            }
         }
 
         Ok(Self {
@@ -445,6 +733,9 @@ impl Workbook {
             active_index,
             source_path: Some(source_path),
             original_styles: Some(styles),
+            original_sheet_rels,
+            extra_defined_names,
+            defined_names,
         })
     }
 
@@ -454,6 +745,16 @@ impl Workbook {
 
     pub fn worksheets(&self) -> &[Worksheet] {
         &self.sheets
+    }
+
+    /// Workbook-global named ranges (generic defined names).
+    pub fn defined_names(&self) -> &crate::DefinedNames {
+        &self.defined_names
+    }
+
+    /// Mutable access to the workbook-global named ranges.
+    pub fn defined_names_mut(&mut self) -> &mut crate::DefinedNames {
+        &mut self.defined_names
     }
 
     pub fn sheetnames(&self) -> Vec<&str> {
@@ -482,6 +783,7 @@ impl Workbook {
 
     pub fn create_sheet(&mut self, name: &str) -> &mut Worksheet {
         self.sheets.push(Worksheet::new(name));
+        self.original_sheet_rels.push(Vec::new());
         self.sheets
             .last_mut()
             .expect("create_sheet always pushes one worksheet")
@@ -512,6 +814,8 @@ fn parse_sheet<R: BufRead>(
     let mut merged_cells = Vec::new();
     let mut column_widths = HashMap::new();
     let mut row_heights = HashMap::new();
+    let mut freeze_panes = None;
+    let mut in_sheet_view = false;
 
     loop {
         match xml.read_event_into(&mut buf)? {
@@ -527,6 +831,24 @@ fn parse_sheet<R: BufRead>(
             Event::Start(e) if e.local_name().as_ref() == b"mergeCell" => {
                 if let Some(range_ref) = attr_value(&e, b"ref")? {
                     merged_cells.push(range_ref);
+                }
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"sheetView" => {
+                in_sheet_view = true;
+            }
+            Event::End(e) if e.local_name().as_ref() == b"sheetView" => {
+                in_sheet_view = false;
+            }
+            Event::Start(e) if in_sheet_view && e.local_name().as_ref() == b"pane" => {
+                if is_frozen_pane(&e)? {
+                    freeze_panes =
+                        normalize_freeze_panes(attr_value(&e, b"topLeftCell")?.as_deref());
+                }
+            }
+            Event::Empty(e) if in_sheet_view && e.local_name().as_ref() == b"pane" => {
+                if is_frozen_pane(&e)? {
+                    freeze_panes =
+                        normalize_freeze_panes(attr_value(&e, b"topLeftCell")?.as_deref());
                 }
             }
             Event::Start(e) if e.local_name().as_ref() == b"v" => {
@@ -594,7 +916,86 @@ fn parse_sheet<R: BufRead>(
         merged_cells,
         column_widths,
         row_heights,
+        freeze_panes,
+        print_area: None,
+        print_title_rows: None,
+        print_title_cols: None,
+        defined_names: crate::DefinedNames::default(),
+        tables: Vec::new(),
+        table_retention: Vec::new(),
     })
+}
+
+fn is_frozen_pane(pane: &BytesStart<'_>) -> Result<bool, OxlsxError> {
+    let state = attr_value(pane, b"state")?;
+    Ok(matches!(
+        state.as_deref(),
+        Some("frozen") | Some("frozenSplit")
+    ))
+}
+
+fn normalize_freeze_panes(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    if upper == "A1" || parse_a1(&upper).is_none() {
+        return None;
+    }
+
+    Some(upper)
+}
+
+fn normalize_print_setting(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Handle multi-range: split by comma first, strip prefix and make absolute per segment
+    if trimmed.contains(',') {
+        let segments: Vec<String> = trimmed
+            .split(',')
+            .filter_map(|segment| {
+                let segment = segment.trim();
+                if segment.is_empty() {
+                    return None;
+                }
+
+                let bare = segment
+                    .rsplit_once('!')
+                    .map_or(segment, |(_, rhs)| rhs)
+                    .trim();
+
+                if bare.is_empty() {
+                    return None;
+                }
+
+                Some(make_absolute_range(bare))
+            })
+            .collect();
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        return Some(segments.join(","));
+    }
+
+    // Single range
+    let bare_range = trimmed
+        .rsplit_once('!')
+        .map_or(trimmed, |(_, rhs)| rhs)
+        .trim();
+
+    if bare_range.is_empty() {
+        return None;
+    }
+
+    let absolute_range = make_absolute_range(bare_range);
+    Some(absolute_range)
 }
 
 #[derive(Debug, Clone)]
@@ -800,17 +1201,6 @@ impl CellDecoder {
     }
 }
 
-fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, OxlsxError> {
-    for attr in e.attributes().with_checks(false) {
-        let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
-        if attr.key.as_ref() == key {
-            return Ok(Some(attr.unescape_value()?.into_owned()));
-        }
-    }
-
-    Ok(None)
-}
-
 fn parse_column_widths(
     e: &BytesStart<'_>,
     column_widths: &mut HashMap<u32, f64>,
@@ -855,6 +1245,45 @@ mod tests {
     use chrono::NaiveDate;
     use quick_xml::events::BytesStart;
     use std::collections::HashMap;
+
+    #[test]
+    fn table_capture_stores_raw_bytes() {
+        let wb = Workbook::open("samples/tables_totals.xlsx").unwrap();
+        let ws = wb.active().unwrap();
+
+        assert_eq!(ws.tables().len(), ws.table_retention.len());
+        assert!(!ws.tables().is_empty());
+
+        let raw = ws.table_retention[0]
+            .as_ref()
+            .expect("a table read from disk retains its raw bytes");
+        assert!(!raw.bytes.is_empty());
+        assert!(!raw.dirty, "a freshly read table starts clean");
+        // The retained bytes are the actual table part (not the parsed model).
+        let text = String::from_utf8_lossy(&raw.bytes);
+        assert!(text.contains("<table"));
+        assert!(text.contains("totalsRowCount"));
+    }
+
+    #[test]
+    fn dirty_tracking_getters_do_not_mark_dirty() {
+        let mut wb = Workbook::open("samples/tables_totals.xlsx").unwrap();
+        let ws = wb.active_mut().unwrap();
+
+        // Read-only access leaves the table clean.
+        let _ = ws.tables().iter().find(|t| t.display_name == "SalesTable");
+        assert!(
+            !ws.table_retention[0].as_ref().unwrap().dirty,
+            "read-only access must not mark the table dirty"
+        );
+
+        // Mutable access flips the dirty flag.
+        let _ = ws.table_mut("SalesTable").unwrap();
+        assert!(
+            ws.table_retention[0].as_ref().unwrap().dirty,
+            "table_mut must mark the table dirty"
+        );
+    }
     use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -1047,6 +1476,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            comment: None,
         };
         assert_eq!(string_cell.text(), Some("Hola"));
 
@@ -1057,6 +1487,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            comment: None,
         };
         assert_eq!(number_cell.text(), None);
 
@@ -1067,6 +1498,7 @@ mod tests {
             styles: styles.clone(),
             write_font: None,
             write_fill: None,
+            comment: None,
         };
         assert_eq!(bool_cell.text(), None);
 
@@ -1077,6 +1509,7 @@ mod tests {
             styles,
             write_font: None,
             write_fill: None,
+            comment: None,
         };
         assert_eq!(empty_cell.text(), None);
     }
@@ -1146,6 +1579,13 @@ mod tests {
                     merged_cells: Vec::new(),
                     column_widths: HashMap::new(),
                     row_heights: HashMap::new(),
+                    freeze_panes: None,
+                    print_area: None,
+                    print_title_rows: None,
+                    print_title_cols: None,
+                    defined_names: crate::DefinedNames::default(),
+                    tables: Vec::new(),
+                    table_retention: Vec::new(),
                 },
                 Worksheet {
                     name: "Productos".to_string(),
@@ -1153,11 +1593,21 @@ mod tests {
                     merged_cells: Vec::new(),
                     column_widths: HashMap::new(),
                     row_heights: HashMap::new(),
+                    freeze_panes: None,
+                    print_area: None,
+                    print_title_rows: None,
+                    print_title_cols: None,
+                    defined_names: crate::DefinedNames::default(),
+                    tables: Vec::new(),
+                    table_retention: Vec::new(),
                 },
             ],
             active_index: 1,
             source_path: None,
             original_styles: None,
+            original_sheet_rels: vec![Vec::new(), Vec::new()],
+            extra_defined_names: Vec::new(),
+            defined_names: crate::DefinedNames::default(),
         };
 
         assert_eq!(wb.sheet(0).unwrap().title(), "Empleados");

@@ -92,7 +92,7 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 3. Date `numFmtId` on write (`Value::Date` → `numFmtId=14`)
 4. Shared strings optimization — `xl/sharedStrings.xml`, `t="s"`
 
-### 🔲 Phase 9 — Iteration API
+### ✅ Phase 9 — Iteration API
 Mirror openpyxl's most-used read patterns:
 1. `ws.iter_rows(min_row, max_row, min_col, max_col, values_only)` → generator
 2. `ws.iter_cols(min_col, max_col, min_row, max_row, values_only)` → generator
@@ -100,7 +100,7 @@ Mirror openpyxl's most-used read patterns:
 4. `ws.max_row`, `ws.max_column`, `ws.min_row`, `ws.min_column` properties
 5. Python bindings for all of the above
 
-### 🔲 Phase 10 — Bulk Write API
+### ✅ Phase 10 — Bulk Write API
 Common patterns for programmatic report generation:
 1. `ws.append(iterable)` — append a row of values at the bottom (list, tuple, dict)
 2. `ws.delete_rows(idx, amount)` / `ws.delete_cols(idx, amount)`
@@ -108,7 +108,7 @@ Common patterns for programmatic report generation:
 4. `ws.move_range(cell_range, rows, cols)`
 5. Python bindings for all of the above
 
-### 🔲 Phase 11 — Rich Cell Formatting
+### ✅ Phase 11 — Rich Cell Formatting
 Complete the formatting surface to match openpyxl:
 1. `cell.number_format` — read and write custom number format strings
 2. `cell.alignment` — `Alignment` struct: horizontal, vertical, wrap_text, indent
@@ -116,15 +116,15 @@ Complete the formatting surface to match openpyxl:
 4. `cell.protection` — locked, hidden flags
 5. Full style round-trip: open → read styles → modify → save with correct styles
 
-### 🔲 Phase 12 — Hyperlinks and Comments
-1. `cell.hyperlink` — read and write hyperlinks (`<hyperlink>` element + rels)
-2. `cell.comment` — read and write comments (`xl/comments*.xml` + drawings)
+### ✅ Phase 12 — Comments (Hyperlinks pending)
+1. `cell.comment` — read and write plain-text comments (`xl/comments*.xml` + VML drawings) ✅
+2. 🔲 `cell.hyperlink` — read/write hyperlinks (`<hyperlink>` element + rels). Implemented on `feat/phase12a-hyperlinks` but NOT yet integrated onto the current base; pending re-integration.
 
-### 🔲 Phase 13 — Named Ranges and Tables
-1. Named ranges — `wb.defined_names`, `ws.add_named_range`
-2. Tables — `ws.add_table(Table(...))`, `ws.tables` property
-3. `ws.freeze_panes` — freeze rows/columns
-4. `ws.print_area`, `ws.print_title_rows`, `ws.print_title_cols`
+### ✅ Phase 13 — Freeze Panes, Print Settings, Named Ranges, Tables
+1. `ws.freeze_panes` — freeze rows/columns
+2. `ws.print_area`, `ws.print_title_rows`, `ws.print_title_cols` (reserved `_xlnm.*` defined names)
+3. Named ranges — `wb.defined_names()` (global) + `ws.defined_names()` (sheet-local), conservative lossless passthrough; reserved-name rejection
+4. Tables — `ws.add_table(Table)`, `ws.tables`, `ws.remove_table()`, `TableStyleInfo`; **lossless RMW** (unmodeled table features preserved verbatim when the table is not mutated)
 
 ### 🔲 Phase 14 — PyPI Publish + CI/CD
 1. `maturin publish` workflow for PyPI releases

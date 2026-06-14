@@ -1,12 +1,15 @@
 use crate::styles::CellXf;
-use crate::{Color, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet};
+use crate::{
+    Color, Comment, Fill, Font, OxlsxError, StyleSheet, Value, Workbook, Worksheet, defined_names,
+    sheet_rels,
+};
 use chrono::NaiveDate;
 use indexmap::IndexMap;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
@@ -212,6 +215,13 @@ pub fn write_xlsx(
     path: &Path,
     source_path: Option<&Path>,
 ) -> Result<(), OxlsxError> {
+    // Reject duplicate table displayNames anywhere in the workbook BEFORE creating
+    // any file (or temp file): Excel requires workbook-wide uniqueness, and a
+    // malformed table set corrupts the whole file. Doing this first guarantees no
+    // partial/0-byte artifact is left behind when the guard trips. The Python layer
+    // also checks early, at add_table time.
+    ensure_unique_table_display_names(wb.worksheets())?;
+
     if source_path.is_some_and(|source| source == path) {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let temp = NamedTempFile::new_in(parent)?;
@@ -236,14 +246,59 @@ fn write_xlsx_to_path(
     let preserve_original = source_path.is_some();
     let shared_strings = collect_shared_strings(sheets);
     let has_shared_strings = !shared_strings.is_empty();
+    let commented_sheets = sheets
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, sheet)| has_comments(sheet).then_some(idx + 1))
+        .collect::<Vec<_>>();
     let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original);
     let mut written_entries = HashSet::new();
 
+    // Allocate the internal `<table id>` for every table (verbatim tables keep
+    // their original id; model tables get collision-free ids). Part numbers —
+    // used for the part filename (`xl/tables/tableN.xml`), the sheet-rel target,
+    // the `<tableParts>` rId, and the content-type override — are a SEPARATE,
+    // strictly sequential workbook-wide sequence, decoupled from the id.
+    let table_ids = assign_table_ids(sheets);
+    let total_tables = table_ids.iter().map(Vec::len).sum::<usize>();
+
+    let mut next_part = 1u32;
+    let part_numbers: Vec<Vec<u32>> = table_ids
+        .iter()
+        .map(|sheet| {
+            sheet
+                .iter()
+                .map(|_| {
+                    let number = next_part;
+                    next_part += 1;
+                    number
+                })
+                .collect()
+        })
+        .collect();
+
     if !preserve_original {
-        write_content_types(&mut zip, options, sheets.len(), has_shared_strings)?;
+        write_content_types(
+            &mut zip,
+            options,
+            sheets.len(),
+            has_shared_strings,
+            &commented_sheets,
+            total_tables,
+        )?;
         written_entries.insert("[Content_Types].xml".to_string());
         write_root_rels(&mut zip, options)?;
         written_entries.insert("_rels/.rels".to_string());
+    } else if has_shared_strings || !commented_sheets.is_empty() || total_tables > 0 {
+        write_content_types_from_source(
+            &mut zip,
+            options,
+            source_path.expect("source path exists when preserve_original is true"),
+            &commented_sheets,
+            total_tables,
+            has_shared_strings,
+        )?;
+        written_entries.insert("[Content_Types].xml".to_string());
     }
 
     write_workbook_xml(&mut zip, options, wb)?;
@@ -261,6 +316,41 @@ fn write_xlsx_to_path(
     }
 
     for (idx, ws) in sheets.iter().enumerate() {
+        let mut sheet_rels_entries = wb.original_sheet_rels.get(idx).cloned().unwrap_or_default();
+        let mut legacy_drawing_rid = None;
+        let sheet_part_numbers = &part_numbers[idx];
+
+        if has_comments(ws) {
+            let comment_target = format!("../comments{}.xml", idx + 1);
+            let vml_target = format!("../drawings/vmlDrawing{}.vml", idx + 1);
+            sheet_rels_entries = sheet_rels::upsert_comment_rels(
+                &sheet_rels_entries,
+                comment_target.as_str(),
+                vml_target.as_str(),
+            );
+            legacy_drawing_rid = sheet_rels::relation_id_for_type(
+                &sheet_rels_entries,
+                sheet_rels::VML_DRAWING_REL_TYPE,
+            )
+            .map(ToString::to_string);
+        }
+
+        // Allocate table relationships AFTER comments so rIds never collide.
+        let mut table_rids: Vec<String> = Vec::new();
+        if !sheet_part_numbers.is_empty() {
+            let targets = sheet_part_numbers
+                .iter()
+                .map(|n| format!("../tables/table{n}.xml"))
+                .collect::<Vec<_>>();
+            let target_refs = targets.iter().map(String::as_str).collect::<Vec<_>>();
+            sheet_rels_entries = sheet_rels::upsert_table_rels(&sheet_rels_entries, &target_refs);
+            for target in &targets {
+                if let Some(rid) = sheet_rels::relation_id_for_target(&sheet_rels_entries, target) {
+                    table_rids.push(rid.to_string());
+                }
+            }
+        }
+
         write_sheet_xml(
             &mut zip,
             options,
@@ -268,8 +358,59 @@ fn write_xlsx_to_path(
             idx,
             &collected.cell_style_ids,
             &shared_strings,
+            &SheetRelRefs {
+                legacy_drawing_rid: legacy_drawing_rid.as_deref(),
+                table_rids: &table_rids,
+            },
         )?;
         written_entries.insert(format!("xl/worksheets/sheet{}.xml", idx + 1));
+
+        if has_comments(ws) {
+            write_comments_xml(&mut zip, options, ws, idx + 1)?;
+            write_vml_drawing(&mut zip, options, ws, idx + 1)?;
+            written_entries.insert(format!("xl/comments{}.xml", idx + 1));
+            written_entries.insert(format!("xl/drawings/vmlDrawing{}.vml", idx + 1));
+        }
+
+        // Re-emit every table part this sheet owns. Table parts are
+        // writer-owned (see `is_writer_owned_entry`), so the originals are NOT
+        // copied by `copy_unknown_entries` — this loop is the single source of
+        // truth. A clean retained table is re-emitted byte-for-byte verbatim
+        // (preserving unmodeled features); a dirty/new table is serialized from
+        // the model. Either way the part filename is the sequential part number,
+        // keeping the `<tableParts>`/rel/content-type wiring consistent.
+        let sheet_table_ids = &table_ids[idx];
+        for (table_idx, (table, &part_number)) in ws
+            .tables()
+            .iter()
+            .zip(sheet_part_numbers.iter())
+            .enumerate()
+        {
+            let (assigned_id, is_verbatim) = sheet_table_ids[table_idx];
+            let part = format!("xl/tables/table{part_number}.xml");
+            if is_verbatim {
+                let raw = ws.table_retention[table_idx]
+                    .as_ref()
+                    .expect("a verbatim table always has retained bytes");
+                write_zip_entry(&mut zip, options, part.as_str(), raw.bytes.clone())?;
+            } else {
+                let mut table_to_write = table.clone();
+                table_to_write.id = assigned_id;
+                if table_to_write.name.is_empty() {
+                    table_to_write.name = table_to_write.display_name.clone();
+                }
+                let bytes = crate::table::serialize_table_xml(&table_to_write)?;
+                write_zip_entry(&mut zip, options, part.as_str(), bytes)?;
+            }
+            written_entries.insert(part);
+        }
+
+        if has_comments(ws) || !sheet_part_numbers.is_empty() {
+            let sheet_rels_xml = sheet_rels::write_sheet_rels(&sheet_rels_entries)?;
+            let rels_part = format!("xl/worksheets/_rels/sheet{}.xml.rels", idx + 1);
+            write_zip_entry(&mut zip, options, rels_part.as_str(), sheet_rels_xml)?;
+            written_entries.insert(rels_part);
+        }
     }
 
     if let Some(source) = source_path {
@@ -323,7 +464,83 @@ fn is_writer_owned_entry(name: &str, sheet_count: usize, preserve_original: bool
         return true;
     }
 
+    // Table parts are always re-emitted from the in-memory model, so the writer
+    // owns them; never blindly copy the originals (which would duplicate or
+    // orphan them after re-numbering).
+    if name.starts_with("xl/tables/") {
+        return true;
+    }
+
     (1..=sheet_count).any(|sheet_idx| name == format!("xl/worksheets/sheet{sheet_idx}.xml"))
+}
+
+/// Return `Err` if two tables anywhere in the workbook share a `display_name` (case-insensitive).
+fn ensure_unique_table_display_names(sheets: &[Worksheet]) -> Result<(), OxlsxError> {
+    let mut seen = HashSet::new();
+    for ws in sheets {
+        for table in ws.tables() {
+            // FIX 6: Case-insensitive comparison (Excel requirement).
+            let lower = table.display_name.to_ascii_lowercase();
+            if !seen.insert(lower) {
+                return Err(OxlsxError::DuplicateTableName(table.display_name.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Allocate the internal `<table id>` for every table, workbook-wide.
+///
+/// Clean retained (verbatim) tables keep their original parsed id — the writer
+/// re-emits their bytes untouched, so the id baked into those bytes must be
+/// honored. Model-path tables (dirty or freshly added) receive newly allocated
+/// ids that avoid every verbatim id, preserving workbook-wide uniqueness.
+///
+/// `result[sheet_idx][table_idx]` is `(assigned_id, is_verbatim)` in declared
+/// table order. The id is independent of the part-filename sequence.
+fn assign_table_ids(sheets: &[Worksheet]) -> Vec<Vec<(u32, bool)>> {
+    // Verbatim ids are fixed (baked into retained bytes); reserve them all
+    // before allocating ids for model-path tables.
+    let mut used: HashSet<u32> = HashSet::new();
+    for ws in sheets {
+        for (idx, table) in ws.tables().iter().enumerate() {
+            if is_clean_retained(ws, idx) {
+                used.insert(table.id);
+            }
+        }
+    }
+
+    let mut next_free = 1u32;
+    sheets
+        .iter()
+        .map(|ws| {
+            ws.tables()
+                .iter()
+                .enumerate()
+                .map(|(idx, table)| {
+                    if is_clean_retained(ws, idx) {
+                        // Verbatim: keep the original id from the retained bytes
+                        // (already parsed into `table.id` at read time).
+                        (table.id, true)
+                    } else {
+                        while used.contains(&next_free) {
+                            next_free += 1;
+                        }
+                        let id = next_free;
+                        used.insert(id);
+                        next_free += 1;
+                        (id, false)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether the table at `idx` has retained source bytes AND is not dirty, i.e.
+/// it should be re-emitted verbatim rather than serialized from the model.
+fn is_clean_retained(ws: &Worksheet, idx: usize) -> bool {
+    matches!(ws.table_retention.get(idx), Some(Some(raw)) if !raw.dirty)
 }
 
 fn write_content_types(
@@ -331,6 +548,8 @@ fn write_content_types(
     options: SimpleFileOptions,
     sheet_count: usize,
     has_shared_strings: bool,
+    commented_sheets: &[usize],
+    total_tables: usize,
 ) -> Result<(), OxlsxError> {
     let mut xml = xml_writer_with_decl()?;
     write_start(
@@ -358,6 +577,19 @@ fn write_content_types(
         "Default",
         &[("Extension", "xml"), ("ContentType", "application/xml")],
     )?;
+    if !commented_sheets.is_empty() {
+        write_empty(
+            &mut xml,
+            "Default",
+            &[
+                ("Extension", "vml"),
+                (
+                    "ContentType",
+                    "application/vnd.openxmlformats-officedocument.vmlDrawing",
+                ),
+            ],
+        )?;
+    }
     write_empty(
         &mut xml,
         "Override",
@@ -407,9 +639,115 @@ fn write_content_types(
             ],
         )?;
     }
+    for sheet_idx in commented_sheets {
+        let part_name = format!("/xl/comments{sheet_idx}.xml");
+        write_empty(
+            &mut xml,
+            "Override",
+            &[
+                ("PartName", part_name.as_str()),
+                (
+                    "ContentType",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml",
+                ),
+            ],
+        )?;
+    }
+    for number in 1..=total_tables {
+        let part_name = format!("/xl/tables/table{number}.xml");
+        write_empty(
+            &mut xml,
+            "Override",
+            &[
+                ("PartName", part_name.as_str()),
+                (
+                    "ContentType",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml",
+                ),
+            ],
+        )?;
+    }
 
     write_end(&mut xml, "Types")?;
     write_zip_entry(zip, options, "[Content_Types].xml", xml.into_inner())
+}
+
+fn write_content_types_from_source(
+    zip: &mut ZipWriter<File>,
+    options: SimpleFileOptions,
+    source: &Path,
+    commented_sheets: &[usize],
+    total_tables: usize,
+    has_shared_strings: bool,
+) -> Result<(), OxlsxError> {
+    let source_file = File::open(source)?;
+    let mut archive = ZipArchive::new(source_file)?;
+    let mut xml = String::new();
+    archive
+        .by_name("[Content_Types].xml")?
+        .read_to_string(&mut xml)?;
+
+    // FIX 1: Strip ALL existing `/xl/tables/tableN.xml` overrides before appending
+    // the writer-owned ones. The writer owns all table parts (see `is_writer_owned_entry`),
+    // so we renumber them to `1..=total_tables` and discard stale indices.
+    // Support BOTH whitespace formats: `"/>` (oxlsx-written) and `" />` (openpyxl-written).
+    for n in 1..=1000 {
+        // Format WITHOUT space before "/>":
+        let pattern_no_space = format!(
+            r#"<Override PartName="/xl/tables/table{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>"#
+        );
+        xml = xml.replace(&pattern_no_space, "");
+
+        // Format WITH space before "/>":
+        let pattern_with_space = format!(
+            r#"<Override PartName="/xl/tables/table{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml" />"#
+        );
+        xml = xml.replace(&pattern_with_space, "");
+    }
+
+    if !xml.contains("Extension=\"vml\"") && !commented_sheets.is_empty() {
+        xml = xml.replace(
+            "</Types>",
+            "<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/></Types>",
+        );
+    }
+
+    for sheet_idx in commented_sheets {
+        let part_name = format!("/xl/comments{sheet_idx}.xml");
+        if xml.contains(part_name.as_str()) {
+            continue;
+        }
+
+        let override_xml = format!(
+            "<Override PartName=\"{part_name}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml\"/>"
+        );
+        xml = xml.replace("</Types>", format!("{override_xml}</Types>").as_str());
+    }
+
+    // FIX 8: Accumulate ALL table overrides BEFORE doing a single replace (O(N) not O(N^2)).
+    let mut table_overrides = String::new();
+    for number in 1..=total_tables {
+        let part_name = format!("/xl/tables/table{number}.xml");
+        let override_xml = format!(
+            "<Override PartName=\"{part_name}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml\"/>"
+        );
+        table_overrides.push_str(&override_xml);
+    }
+    if !table_overrides.is_empty() {
+        xml = xml.replace("</Types>", format!("{table_overrides}</Types>").as_str());
+    }
+
+    // CRITICAL FIX: Inject sharedStrings Override when writer creates xl/sharedStrings.xml
+    // but source manifest lacks it (e.g., RMW of openpyxl-authored file with inline strings).
+    if has_shared_strings && !xml.contains("/xl/sharedStrings.xml") {
+        let shared_strings_override = r#"<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>"#;
+        xml = xml.replace(
+            "</Types>",
+            format!("{shared_strings_override}</Types>").as_str(),
+        );
+    }
+
+    write_zip_entry(zip, options, "[Content_Types].xml", xml.into_bytes())
 }
 
 fn write_root_rels(
@@ -481,6 +819,12 @@ fn write_workbook_xml(
         )?;
     }
     write_end(&mut xml, "sheets")?;
+    defined_names::write_defined_names_block(
+        &mut xml,
+        wb.worksheets(),
+        wb.defined_names(),
+        &wb.extra_defined_names,
+    )?;
     write_end(&mut xml, "workbook")?;
     write_zip_entry(zip, options, "xl/workbook.xml", xml.into_inner())
 }
@@ -725,6 +1069,13 @@ fn write_shared_strings_xml(
     write_zip_entry(zip, options, "xl/sharedStrings.xml", xml.into_inner())
 }
 
+/// Relationship references that influence the sheet XML body: the legacy VML
+/// drawing rId (for comments) and the table part rIds (for `<tableParts>`).
+struct SheetRelRefs<'a> {
+    legacy_drawing_rid: Option<&'a str>,
+    table_rids: &'a [String],
+}
+
 fn write_sheet_xml(
     zip: &mut ZipWriter<File>,
     options: SimpleFileOptions,
@@ -732,16 +1083,28 @@ fn write_sheet_xml(
     sheet_idx: usize,
     style_ids: &HashMap<(usize, String), u32>,
     shared_strings: &IndexMap<String, usize>,
+    rel_refs: &SheetRelRefs<'_>,
 ) -> Result<(), OxlsxError> {
+    let SheetRelRefs {
+        legacy_drawing_rid,
+        table_rids,
+    } = *rel_refs;
     let mut xml = xml_writer_with_decl()?;
-    write_start(
-        &mut xml,
-        "worksheet",
-        &[(
-            "xmlns",
-            "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-        )],
-    )?;
+    let mut worksheet_attrs = vec![(
+        "xmlns",
+        "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    )];
+    if legacy_drawing_rid.is_some() || !table_rids.is_empty() {
+        worksheet_attrs.push((
+            "xmlns:r",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        ));
+    }
+    write_start(&mut xml, "worksheet", worksheet_attrs.as_slice())?;
+
+    if let Some(coord) = ws.freeze_panes() {
+        write_freeze_panes_view(&mut xml, coord)?;
+    }
 
     if !ws.column_widths.is_empty() {
         write_start(&mut xml, "cols", &[])?;
@@ -846,9 +1209,235 @@ fn write_sheet_xml(
         write_end(&mut xml, "mergeCells")?;
     }
 
+    if let Some(rel_id) = legacy_drawing_rid {
+        write_empty(&mut xml, "legacyDrawing", &[("r:id", rel_id)])?;
+    }
+
+    // `<tableParts>` MUST be the last child of `<worksheet>` (after legacyDrawing
+    // per the OOXML schema), or Excel flags the file for repair.
+    if !table_rids.is_empty() {
+        let count = table_rids.len().to_string();
+        write_start(&mut xml, "tableParts", &[("count", count.as_str())])?;
+        for rid in table_rids {
+            write_empty(&mut xml, "tablePart", &[("r:id", rid.as_str())])?;
+        }
+        write_end(&mut xml, "tableParts")?;
+    }
+
     write_end(&mut xml, "worksheet")?;
     let part = format!("xl/worksheets/sheet{}.xml", sheet_idx + 1);
     write_zip_entry(zip, options, part.as_str(), xml.into_inner())
+}
+
+fn has_comments(ws: &Worksheet) -> bool {
+    ws.cells().values().any(|cell| cell.comment().is_some())
+}
+
+fn write_freeze_panes_view(xml: &mut Writer<Vec<u8>>, coord: &str) -> Result<(), OxlsxError> {
+    let Some((row, col)) = parse_a1_coord(coord) else {
+        return Ok(());
+    };
+
+    let x_split = col.saturating_sub(1);
+    let y_split = row.saturating_sub(1);
+    if x_split == 0 && y_split == 0 {
+        return Ok(());
+    }
+
+    write_start(xml, "sheetViews", &[])?;
+    write_start(xml, "sheetView", &[("workbookViewId", "0")])?;
+
+    let active_pane = if x_split > 0 && y_split > 0 {
+        "bottomRight"
+    } else if y_split > 0 {
+        "bottomLeft"
+    } else {
+        "topRight"
+    };
+
+    let mut pane_attrs = vec![
+        ("topLeftCell", coord.to_string()),
+        ("activePane", active_pane.to_string()),
+        ("state", "frozen".to_string()),
+    ];
+    if x_split > 0 {
+        pane_attrs.push(("xSplit", x_split.to_string()));
+    }
+    if y_split > 0 {
+        pane_attrs.push(("ySplit", y_split.to_string()));
+    }
+
+    let pane_ref = pane_attrs
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect::<Vec<_>>();
+    write_empty(xml, "pane", pane_ref.as_slice())?;
+
+    if x_split > 0 && y_split > 0 {
+        write_empty(xml, "selection", &[("pane", "topRight")])?;
+        write_empty(xml, "selection", &[("pane", "bottomLeft")])?;
+        write_empty(
+            xml,
+            "selection",
+            &[
+                ("pane", "bottomRight"),
+                ("activeCell", coord),
+                ("sqref", coord),
+            ],
+        )?;
+    } else {
+        write_empty(
+            xml,
+            "selection",
+            &[
+                ("pane", active_pane),
+                ("activeCell", coord),
+                ("sqref", coord),
+            ],
+        )?;
+    }
+
+    write_end(xml, "sheetView")?;
+    write_end(xml, "sheetViews")
+}
+
+fn parse_a1_coord(reference: &str) -> Option<(u32, u32)> {
+    let mut col = 0_u32;
+    let mut row_text = String::new();
+
+    for ch in reference.chars() {
+        if ch.is_ascii_alphabetic() {
+            let upper = ch.to_ascii_uppercase() as u32;
+            col = col * 26 + (upper - 'A' as u32 + 1);
+        } else if ch.is_ascii_digit() {
+            row_text.push(ch);
+        }
+    }
+
+    let row = row_text.parse::<u32>().ok()?;
+    if row == 0 || col == 0 {
+        return None;
+    }
+
+    Some((row, col))
+}
+
+fn sorted_comments(ws: &Worksheet) -> Vec<(&str, &Comment)> {
+    let mut comments = ws
+        .cells()
+        .iter()
+        .filter_map(|(reference, cell)| cell.comment().map(|comment| (reference.as_str(), comment)))
+        .collect::<Vec<_>>();
+    comments.sort_by_key(|(reference, _)| cell_sort_key(reference));
+    comments
+}
+
+fn write_comments_xml(
+    zip: &mut ZipWriter<File>,
+    options: SimpleFileOptions,
+    ws: &Worksheet,
+    sheet_idx: usize,
+) -> Result<(), OxlsxError> {
+    let comments = sorted_comments(ws);
+    if comments.is_empty() {
+        return Ok(());
+    }
+
+    let mut authors = Vec::<String>::new();
+    let mut author_ids = HashMap::<String, usize>::new();
+    for (_, comment) in &comments {
+        if !author_ids.contains_key(comment.author.as_str()) {
+            let id = authors.len();
+            authors.push(comment.author.clone());
+            author_ids.insert(comment.author.clone(), id);
+        }
+    }
+
+    let mut xml = xml_writer_with_decl()?;
+    write_start(
+        &mut xml,
+        "comments",
+        &[(
+            "xmlns",
+            "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        )],
+    )?;
+
+    write_start(&mut xml, "authors", &[])?;
+    for author in &authors {
+        write_start(&mut xml, "author", &[])?;
+        xml.write_event(Event::Text(BytesText::new(author)))?;
+        write_end(&mut xml, "author")?;
+    }
+    write_end(&mut xml, "authors")?;
+
+    write_start(&mut xml, "commentList", &[])?;
+    for (reference, comment) in comments {
+        let author_id = author_ids
+            .get(comment.author.as_str())
+            .copied()
+            .unwrap_or(0)
+            .to_string();
+        write_start(
+            &mut xml,
+            "comment",
+            &[("ref", reference), ("authorId", author_id.as_str())],
+        )?;
+        write_start(&mut xml, "text", &[])?;
+        write_start(&mut xml, "t", &[])?;
+        xml.write_event(Event::Text(BytesText::new(comment.text.as_str())))?;
+        write_end(&mut xml, "t")?;
+        write_end(&mut xml, "text")?;
+        write_end(&mut xml, "comment")?;
+    }
+    write_end(&mut xml, "commentList")?;
+    write_end(&mut xml, "comments")?;
+
+    let part = format!("xl/comments{sheet_idx}.xml");
+    write_zip_entry(zip, options, part.as_str(), xml.into_inner())
+}
+
+fn write_vml_drawing(
+    zip: &mut ZipWriter<File>,
+    options: SimpleFileOptions,
+    ws: &Worksheet,
+    sheet_idx: usize,
+) -> Result<(), OxlsxError> {
+    let comments = sorted_comments(ws);
+    if comments.is_empty() {
+        return Ok(());
+    }
+
+    let mut shapes = String::new();
+    for (idx, (reference, _)) in comments.iter().enumerate() {
+        let (row, col) = cell_sort_key(reference);
+        shapes.push_str(
+            format!(
+                r##"<v:shape id="_x0000_s{}" type="#_x0000_t202" style="position:absolute;margin-left:80pt;margin-top:5pt;width:104pt;height:64pt;z-index:1;visibility:hidden" fillcolor="#ffffe1" o:insetmode="auto"><v:fill color2="#ffffe1"/><v:shadow on="t" color="black" obscured="t"/><v:path o:connecttype="none"/><v:textbox style="mso-direction-alt:auto"><div style="text-align:left"></div></v:textbox><x:ClientData ObjectType="Note"><x:MoveWithCells/><x:SizeWithCells/><x:Anchor>1, 15, 0, 2, 3, 15, 4, 4</x:Anchor><x:AutoFill>False</x:AutoFill><x:Row>{}</x:Row><x:Column>{}</x:Column></x:ClientData></v:shape>"##,
+                1024 + idx,
+                row.saturating_sub(1),
+                col.saturating_sub(1)
+            )
+            .as_str(),
+        );
+    }
+
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xml xmlns:v="urn:schemas-microsoft-com:vml"
+     xmlns:o="urn:schemas-microsoft-com:office:office"
+     xmlns:x="urn:schemas-microsoft-com:office:excel">
+  <o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>
+  <v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe">
+    <v:stroke joinstyle="miter"/>
+    <v:path gradientshapeok="t" o:connecttype="rect"/>
+  </v:shapetype>
+  {shapes}
+</xml>"#
+    );
+
+    let part = format!("xl/drawings/vmlDrawing{sheet_idx}.vml");
+    write_zip_entry(zip, options, part.as_str(), xml.into_bytes())
 }
 
 fn write_cell(
@@ -993,6 +1582,36 @@ mod tests {
     use std::io::{BufReader, Cursor};
     use std::time::{SystemTime, UNIX_EPOCH};
     use zip::ZipArchive;
+
+    #[test]
+    fn assign_table_ids_avoids_verbatim_collision() {
+        use crate::Table;
+        use crate::table::RawTable;
+
+        let mut ws = Worksheet::new("Sheet");
+        // One verbatim (clean retained) table whose internal id is 5.
+        ws.add_table(Table::new("Verbatim", "A1:B2")).unwrap();
+        ws.tables[0].id = 5;
+        ws.table_retention[0] = Some(RawTable {
+            bytes: b"<table id=\"5\"/>".to_vec(),
+            dirty: false,
+        });
+        // One model table (no retained bytes) that must avoid id 5.
+        ws.add_table(Table::new("Fresh", "D1:E2")).unwrap();
+
+        let ids = super::assign_table_ids(&[ws]);
+        let sheet = &ids[0];
+        assert_eq!(sheet.len(), 2);
+
+        // Verbatim keeps its original id and is flagged verbatim.
+        assert_eq!(sheet[0], (5, true));
+
+        // Model table is allocated, distinct, and never collides with 5.
+        let (model_id, is_verbatim) = sheet[1];
+        assert!(!is_verbatim);
+        assert_ne!(model_id, 5);
+        assert_ne!(model_id, sheet[0].0, "ids must be unique workbook-wide");
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
