@@ -11,12 +11,19 @@ pub const VML_DRAWING_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing";
 pub const TABLE_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+pub const HYPERLINK_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SheetRelEntry {
     pub id: String,
     pub rel_type: String,
     pub target: String,
+    /// `TargetMode` attribute, when present. `None` for the common
+    /// document-internal rels (comments, tables, printerSettings, ...) so they
+    /// serialize byte-identically; external hyperlink rels carry
+    /// `Some("External")`.
+    pub target_mode: Option<String>,
 }
 
 pub fn parse_sheet_rels<R: BufRead>(reader: R) -> Result<Vec<SheetRelEntry>, OxlsxError> {
@@ -38,6 +45,7 @@ pub fn parse_sheet_rels<R: BufRead>(reader: R) -> Result<Vec<SheetRelEntry>, Oxl
                         id,
                         rel_type,
                         target,
+                        target_mode: attr_value(&e, b"TargetMode")?,
                     });
                 }
             }
@@ -71,6 +79,9 @@ pub fn write_sheet_rels(entries: &[SheetRelEntry]) -> Result<Vec<u8>, OxlsxError
         relationship.push_attribute(("Id", entry.id.as_str()));
         relationship.push_attribute(("Type", entry.rel_type.as_str()));
         relationship.push_attribute(("Target", entry.target.as_str()));
+        if let Some(mode) = &entry.target_mode {
+            relationship.push_attribute(("TargetMode", mode.as_str()));
+        }
         xml.write_event(Event::Empty(relationship))?;
     }
 
@@ -96,6 +107,7 @@ pub fn upsert_comment_rels(
         id: comment_id,
         rel_type: COMMENTS_REL_TYPE.to_string(),
         target: comment_target.to_string(),
+        target_mode: None,
     });
 
     // Allocate the vml id AFTER pushing the comment entry, so on a from-scratch
@@ -107,6 +119,7 @@ pub fn upsert_comment_rels(
         id: vml_id,
         rel_type: VML_DRAWING_REL_TYPE.to_string(),
         target: vml_target.to_string(),
+        target_mode: None,
     });
 
     merged
@@ -131,6 +144,40 @@ pub fn upsert_table_rels(existing: &[SheetRelEntry], table_targets: &[&str]) -> 
             id: format!("rId{next}"),
             rel_type: TABLE_REL_TYPE.to_string(),
             target: (*target).to_string(),
+            target_mode: None,
+        });
+    }
+
+    merged
+}
+
+/// Replace this sheet's external hyperlink relationships with one entry per
+/// `external_targets`.
+///
+/// Mirrors [`upsert_comment_rels`] / [`upsert_table_rels`]: unrelated
+/// relationships (comments, tables, printerSettings, ...) are preserved
+/// untouched and keep their `target_mode: None`, so they serialize
+/// byte-identically. Existing hyperlink relationships are dropped and
+/// re-created. New rIds are allocated above the highest existing id via
+/// [`next_rel_id`] — i.e. AFTER any comment/table rIds the writer has already
+/// merged in — guaranteeing no collision. Each external hyperlink rel carries
+/// `target_mode = Some("External")`.
+pub fn upsert_hyperlink_rels(
+    existing: &[SheetRelEntry],
+    external_targets: &[&str],
+) -> Vec<SheetRelEntry> {
+    let mut merged = existing
+        .iter()
+        .filter(|entry| entry.rel_type != HYPERLINK_REL_TYPE)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for (next, target) in (next_rel_id(&merged)..).zip(external_targets.iter()) {
+        merged.push(SheetRelEntry {
+            id: format!("rId{next}"),
+            rel_type: HYPERLINK_REL_TYPE.to_string(),
+            target: (*target).to_string(),
+            target_mode: Some("External".to_string()),
         });
     }
 
@@ -257,10 +304,10 @@ fn id_for_type_or_next(
 #[cfg(test)]
 mod tests {
     use super::{
-        COMMENTS_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, VML_DRAWING_REL_TYPE, parse_sheet_rels,
-        relation_id_for_target, relation_id_for_type, relation_target_for_type,
+        COMMENTS_REL_TYPE, HYPERLINK_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, VML_DRAWING_REL_TYPE,
+        parse_sheet_rels, relation_id_for_target, relation_id_for_type, relation_target_for_type,
         relation_targets_for_type, resolve_sheet_target, sheet_rels_path, upsert_comment_rels,
-        upsert_table_rels, write_sheet_rels,
+        upsert_hyperlink_rels, upsert_table_rels, write_sheet_rels,
     };
     use std::io::Cursor;
 
@@ -287,11 +334,13 @@ mod tests {
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings"
                         .to_string(),
                 target: "../printerSettings/printerSettings1.bin".to_string(),
+                target_mode: None,
             },
             SheetRelEntry {
                 id: "rId2".to_string(),
                 rel_type: COMMENTS_REL_TYPE.to_string(),
                 target: "../comments-old.xml".to_string(),
+                target_mode: None,
             },
         ];
 
@@ -336,6 +385,7 @@ mod tests {
             id: "rId3".to_string(),
             rel_type: COMMENTS_REL_TYPE.to_string(),
             target: "../comments-old.xml".to_string(),
+            target_mode: None,
         }];
 
         let merged =
@@ -355,6 +405,7 @@ mod tests {
             id: "rId2".to_string(),
             rel_type: VML_DRAWING_REL_TYPE.to_string(),
             target: "../drawings/vmlDrawing-old.vml".to_string(),
+            target_mode: None,
         }];
 
         let merged =
@@ -372,6 +423,7 @@ mod tests {
             id: "rId1".to_string(),
             rel_type: COMMENTS_REL_TYPE.to_string(),
             target: "../comments1.xml".to_string(),
+            target_mode: None,
         }];
         let xml = String::from_utf8(write_sheet_rels(&rels).unwrap()).unwrap();
         assert!(xml.contains("Relationship"));
@@ -385,16 +437,19 @@ mod tests {
                 id: "rId1".to_string(),
                 rel_type: COMMENTS_REL_TYPE.to_string(),
                 target: "../comments1.xml".to_string(),
+                target_mode: None,
             },
             SheetRelEntry {
                 id: "rId2".to_string(),
                 rel_type: VML_DRAWING_REL_TYPE.to_string(),
                 target: "../drawings/vmlDrawing1.vml".to_string(),
+                target_mode: None,
             },
             SheetRelEntry {
                 id: "rId3".to_string(),
                 rel_type: TABLE_REL_TYPE.to_string(),
                 target: "../tables/stale.xml".to_string(),
+                target_mode: None,
             },
         ];
 
@@ -430,16 +485,19 @@ mod tests {
                 id: "rId1".to_string(),
                 rel_type: COMMENTS_REL_TYPE.to_string(),
                 target: "../comments1.xml".to_string(),
+                target_mode: None,
             },
             SheetRelEntry {
                 id: "rId2".to_string(),
                 rel_type: TABLE_REL_TYPE.to_string(),
                 target: "../tables/table1.xml".to_string(),
+                target_mode: None,
             },
             SheetRelEntry {
                 id: "rId3".to_string(),
                 rel_type: TABLE_REL_TYPE.to_string(),
                 target: "/xl/tables/table2.xml".to_string(),
+                target_mode: None,
             },
         ];
 
@@ -459,6 +517,175 @@ mod tests {
         assert_eq!(
             sheet_rels_path("xl/worksheets/sheet1.xml"),
             "xl/worksheets/_rels/sheet1.xml.rels"
+        );
+    }
+
+    #[test]
+    fn write_sheet_rels_omits_target_mode_when_none_emits_when_some() {
+        // Byte-identity guard at the unit level: a `None` target_mode must NOT
+        // serialize any `TargetMode` attribute (so legacy comment/table/printer
+        // rels stay byte-identical), while an external hyperlink rel
+        // (`Some("External")`) MUST emit `TargetMode="External"`.
+        let rels = vec![
+            SheetRelEntry {
+                id: "rId1".to_string(),
+                rel_type: TABLE_REL_TYPE.to_string(),
+                target: "../tables/table1.xml".to_string(),
+                target_mode: None,
+            },
+            SheetRelEntry {
+                id: "rId2".to_string(),
+                rel_type: HYPERLINK_REL_TYPE.to_string(),
+                target: "https://example.com".to_string(),
+                target_mode: Some("External".to_string()),
+            },
+        ];
+
+        let xml = String::from_utf8(write_sheet_rels(&rels).unwrap()).unwrap();
+
+        // The table rel (None) carries no TargetMode.
+        let table_fragment = xml
+            .split("<Relationship")
+            .find(|frag| frag.contains("table1.xml"))
+            .expect("table relationship present");
+        assert!(
+            !table_fragment.contains("TargetMode"),
+            "None target_mode must not emit TargetMode: {table_fragment}"
+        );
+
+        // The hyperlink rel (Some) carries TargetMode="External".
+        let hyperlink_fragment = xml
+            .split("<Relationship")
+            .find(|frag| frag.contains("https://example.com"))
+            .expect("hyperlink relationship present");
+        assert!(
+            hyperlink_fragment.contains(r#"TargetMode="External""#),
+            "Some target_mode must emit TargetMode: {hyperlink_fragment}"
+        );
+    }
+
+    #[test]
+    fn parse_sheet_rels_reads_target_mode_when_present() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>
+</Relationships>"#;
+
+        let rels = parse_sheet_rels(Cursor::new(xml.as_bytes())).unwrap();
+        assert_eq!(rels.len(), 2);
+        assert_eq!(
+            rels[0].target_mode, None,
+            "rels without TargetMode default to None"
+        );
+        assert_eq!(
+            rels[1].target_mode.as_deref(),
+            Some("External"),
+            "external rels round-trip TargetMode"
+        );
+    }
+
+    #[test]
+    fn upsert_hyperlink_rels_from_scratch_allocates_first_id_as_external() {
+        let merged = upsert_hyperlink_rels(&[], &["https://example.com"]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "rId1");
+        assert_eq!(merged[0].rel_type, HYPERLINK_REL_TYPE);
+        assert_eq!(merged[0].target, "https://example.com");
+        assert_eq!(merged[0].target_mode.as_deref(), Some("External"));
+    }
+
+    #[test]
+    fn upsert_hyperlink_rels_allocates_ids_after_comments_and_tables() {
+        // A sheet that already references a comment (rId1), its VML (rId2) and a
+        // table (rId3). Two hyperlinks must take the NEXT free ids (rId4, rId5)
+        // so they never collide with comment/table rIds.
+        let existing = vec![
+            SheetRelEntry {
+                id: "rId1".to_string(),
+                rel_type: COMMENTS_REL_TYPE.to_string(),
+                target: "../comments1.xml".to_string(),
+                target_mode: None,
+            },
+            SheetRelEntry {
+                id: "rId2".to_string(),
+                rel_type: VML_DRAWING_REL_TYPE.to_string(),
+                target: "../drawings/vmlDrawing1.vml".to_string(),
+                target_mode: None,
+            },
+            SheetRelEntry {
+                id: "rId3".to_string(),
+                rel_type: TABLE_REL_TYPE.to_string(),
+                target: "../tables/table1.xml".to_string(),
+                target_mode: None,
+            },
+        ];
+
+        let merged =
+            upsert_hyperlink_rels(&existing, &["https://example.com", "https://rust-lang.org"]);
+
+        // Unrelated rels preserved unchanged, still without a TargetMode.
+        assert_eq!(
+            relation_target_for_type(&merged, COMMENTS_REL_TYPE),
+            Some("../comments1.xml")
+        );
+        assert_eq!(
+            relation_target_for_type(&merged, TABLE_REL_TYPE),
+            Some("../tables/table1.xml")
+        );
+        for entry in &merged {
+            if entry.rel_type != HYPERLINK_REL_TYPE {
+                assert_eq!(
+                    entry.target_mode, None,
+                    "non-hyperlink rels must keep target_mode None: {entry:?}"
+                );
+            }
+        }
+
+        let rid1 = relation_id_for_target(&merged, "https://example.com").unwrap();
+        let rid2 = relation_id_for_target(&merged, "https://rust-lang.org").unwrap();
+        assert_eq!(rid1, "rId4");
+        assert_eq!(rid2, "rId5");
+        assert_ne!(rid1, rid2, "hyperlink rIds must be unique");
+
+        // Both hyperlink rels carry TargetMode="External".
+        for target in ["https://example.com", "https://rust-lang.org"] {
+            let entry = merged.iter().find(|e| e.target == target).unwrap();
+            assert_eq!(entry.target_mode.as_deref(), Some("External"));
+        }
+    }
+
+    #[test]
+    fn upsert_hyperlink_rels_drops_stale_hyperlink_rels() {
+        // An existing (stale) hyperlink rel must be replaced, not duplicated.
+        let existing = vec![
+            SheetRelEntry {
+                id: "rId1".to_string(),
+                rel_type: COMMENTS_REL_TYPE.to_string(),
+                target: "../comments1.xml".to_string(),
+                target_mode: None,
+            },
+            SheetRelEntry {
+                id: "rId2".to_string(),
+                rel_type: HYPERLINK_REL_TYPE.to_string(),
+                target: "https://stale.example".to_string(),
+                target_mode: Some("External".to_string()),
+            },
+        ];
+
+        let merged = upsert_hyperlink_rels(&existing, &["https://fresh.example"]);
+
+        let hyperlinks = relation_targets_for_type(&merged, HYPERLINK_REL_TYPE);
+        assert_eq!(
+            hyperlinks,
+            vec!["https://fresh.example"],
+            "stale hyperlink rel must be dropped, only the fresh target remains"
+        );
+        assert_eq!(
+            relation_target_for_type(&merged, COMMENTS_REL_TYPE),
+            Some("../comments1.xml"),
+            "unrelated comment rel preserved"
         );
     }
 }

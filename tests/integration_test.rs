@@ -2409,3 +2409,63 @@ fn tables_readonly_access_keeps_table_verbatim() {
 
     fs::remove_file(path).ok();
 }
+
+// --- Hyperlink Slice 1: byte-identity guard (Scenario 5) -------------------
+
+/// Adding the `target_mode` field to `SheetRelEntry` MUST NOT change the
+/// serialization of existing comment/table/printerSettings rels. The
+/// discriminator: RMW `samples/tables_totals.xlsx` (whose sheet rels are two
+/// `table` relationships with no `TargetMode`) and assert that the re-emitted
+/// sheet rels carry NO `TargetMode` attribute, still reference both table
+/// parts, and that the table part itself stays byte-for-byte identical (the
+/// existing no-repair / lossless-RMW byte-equality discriminator).
+#[test]
+fn existing_rels_remain_byte_identical_without_hyperlinks() {
+    let path = temp_path("oxlsx_hyperlink_byte_identity.xlsx");
+    fs::copy("samples/tables_totals.xlsx", &path).unwrap();
+
+    let original_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+
+    let mut wb = Workbook::open(&path).unwrap();
+    {
+        let ws = wb.active_mut().unwrap();
+        ws.set_cell("H10", "unrelated"); // outside every table / hyperlink
+    }
+    wb.save(&path).unwrap();
+
+    // The sheet rels must NOT gain a TargetMode attribute on the legacy table
+    // rels — the whole point of defaulting `target_mode` to `None`.
+    let sheet_rels = read_zip_entry(&path, "xl/worksheets/_rels/sheet1.xml.rels");
+    assert!(
+        !sheet_rels.contains("TargetMode"),
+        "no TargetMode may appear on non-hyperlink rels: {sheet_rels}"
+    );
+
+    // Both table relationships still resolve to their parts.
+    let table_targets: Vec<String> = sheet_rels
+        .split("<Relationship")
+        .skip(1)
+        .filter(|frag| {
+            attr_in(frag, "Type")
+                .map(|t| t.ends_with("/table"))
+                .unwrap_or(false)
+        })
+        .filter_map(|frag| attr_in(frag, "Target"))
+        .collect();
+    assert_eq!(
+        table_targets.len(),
+        2,
+        "both table rels preserved: {sheet_rels}"
+    );
+    assert!(table_targets.iter().any(|t| t.contains("table1.xml")));
+    assert!(table_targets.iter().any(|t| t.contains("table2.xml")));
+
+    // The table part is still re-emitted byte-for-byte (lossless-RMW guard).
+    let saved_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+    assert_eq!(
+        saved_table1, original_table1,
+        "clean table part must stay byte-identical after target_mode was added"
+    );
+
+    fs::remove_file(path).ok();
+}
