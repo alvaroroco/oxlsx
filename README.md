@@ -6,7 +6,7 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 ## Status
 
-Active development — Phases 1–4 complete. API stabilizing.
+Active development — Phases 1–13 complete (hyperlinks pending integration). API stabilizing.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
@@ -14,9 +14,18 @@ Active development — Phases 1–4 complete. API stabilizing.
 | 2 | Shared strings, `Value::String/Bool`, `cell.text()` | ✅ Done |
 | 3 | Multi-sheet, `Value::Date`, openpyxl API parity | ✅ Done |
 | 4 | Write support — `Workbook::new()` + `wb.save()` | ✅ Done |
-| 5 | Lazy / streaming reader (beat openpyxl on all benchmarks) | 🔲 Planned |
-| 6 | PyO3 Python bindings | 🔲 Planned |
-| 7 | Read-modify-write (open + edit + save) | 🔲 Planned |
+| 5 | Lazy / streaming reader (`open_readonly()`) | ✅ Done |
+| 6 | PyO3 Python bindings | ✅ Done |
+| 7 | Read-modify-write (open + edit + save) | ✅ Done |
+| 8 | Extended write features | ✅ Done |
+| 9 | Worksheet iteration API | ✅ Done |
+| 10 | Bulk write API | ✅ Done |
+| 11 | Rich formatting | ✅ Done |
+| 12 | Plain-text comments | ✅ Done |
+| 13 | Freeze panes, print settings, named ranges, tables (lossless RMW) | ✅ Done |
+| 12a | Hyperlinks | 🔲 Pending integration (on `feat/phase12a-hyperlinks`) |
+| 14 | Distribution / CI hardening | 🔲 Planned |
+| 15 | Pandas engine / tabular adapter | 🔲 Planned |
 
 ## Usage
 
@@ -98,6 +107,13 @@ fn main() -> Result<(), oxlsx::OxlsxError> {
 | `cell.value` → `str/int/float/date` | `cell.value()` → `&Value` |
 | `cell.font.bold` | `cell.font()?.bold` |
 | `cell.fill.fgColor` | `cell.fill()?.fg_color` |
+| `cell.comment` | `cell.comment()` / `ws.set_cell_comment(...)` |
+| `ws.freeze_panes` | `ws.freeze_panes()` / `ws.set_freeze_panes(...)` |
+| `ws.print_area` | `ws.print_area()` / `ws.set_print_area(...)` |
+| `ws.print_title_rows` / `print_title_cols` | `ws.print_title_rows()` / `ws.print_title_cols()` (+ setters) |
+| `wb.defined_names` | `wb.defined_names()` (global) / `ws.defined_names()` (sheet-local) |
+| `ws.add_table(Table(...))` | `ws.add_table(Table::new(...))` |
+| `ws.tables` / `del ws.tables["T"]` | `ws.tables()` / `ws.remove_table("T")` |
 | `wb.save("out.xlsx")` | `wb.save("out.xlsx")` |
 
 ## Benchmarks
@@ -136,12 +152,14 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 | `Workbook` | Entry point — open or create, access sheets |
 | `Worksheet` | Access / set cells by Excel reference (`"A1"`, `"B3"`) |
 | `Cell` | Holds `Value` + `StyleId` + shared `Arc<StyleSheet>` |
-| `Value` | `Empty \| String(String) \| Number(f64) \| Bool(bool) \| Date(NaiveDate)` |
+| `Value` | `Empty \| String(String) \| Number(f64) \| Bool(bool) \| Date(NaiveDate) \| Formula(String)` |
 | `StyleSheet` | Registry mapping `StyleId` → `Font` + `Fill` |
 | `StyleId` | Newtype `(usize)` — prevents index confusion at compile time |
 | `Font` | Bold, italic, size, family, color |
 | `Fill` | Pattern type, foreground/background color |
 | `Color` | `Argb(String) \| Indexed(u32) \| Theme(u32)` |
+| `DefinedName` | Named range — `name`, `value` (+ `comment`, `hidden`); global or sheet-local |
+| `Table` | Worksheet table — `display_name`, `ref`, `columns`, optional `TableStyleInfo`; lossless RMW for unmodeled features |
 
 ## Architecture
 
@@ -171,49 +189,25 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 - [x] Write support: `Workbook::new()`, `ws.set_cell()`, `wb.save()`
 - [x] Style round-trip: bold font + solid fill survive write → open cycle
 - [x] Criterion benchmarks + openpyxl comparison script
+- [x] Streaming reader (`open_readonly()`), PyO3 bindings, read-modify-write
+- [x] Extended write: formulas, merged cells, column widths, date numFmt
+- [x] Iteration API (`iter_rows`/`iter_cols`/`rows`/`columns`/`values`, bounds)
+- [x] Bulk write (`append`, insert/delete rows/cols, `move_range`)
+- [x] Rich formatting (`number_format`, `alignment`, `border`, `protection`)
+- [x] Plain-text comments
+- [x] Freeze panes; print area / print titles
+- [x] Named ranges — `wb.defined_names()` (global) + `ws.defined_names()` (sheet-local), conservative lossless passthrough
+- [x] Tables — `ws.add_table()`, `ws.tables`, `TableStyleInfo`; **lossless RMW** (unmodeled table features preserved verbatim when untouched)
 
 ### 🔲 Planned
 
-- [ ] **Phase 5 — `open_readonly()` streaming reader**
-  - `Workbook::open_readonly(path)` — mirrors openpyxl's `read_only=True`
-  - `ws.rows()` iterator — streaming SAX, no HashMap, no random access
-  - Lazy cell parsing: parse on demand, not at open time
-  - Target: metadata 21ms → ~1ms — beat openpyxl on **all** benchmarks
-  - Required for files > 100k rows within the 50MB memory target
+- [ ] **Hyperlinks (Phase 12a)** — `cell.hyperlink` read/write; implemented on `feat/phase12a-hyperlinks` but not yet integrated onto the current base
 
-- [ ] **Phase 6 — PyO3 Python bindings**
-  - `#[pyclass]` / `#[pymethods]` on all public structs
-  - `maturin` build + publish to PyPI
-  - `cell.value` returns native Python `str / int / float / datetime.date`
-  - `wb["Sheet1"]` via `__getitem__`
-
-- [ ] **Phase 7 — Read-modify-write**
-  - Open existing `.xlsx`, modify cells, save back
-  - Preserve unsupported parts (charts, images, macros)
-
-- [ ] **Phase 8 — Extended write features**
-  - Formulas, merged cells, column widths
-  - Date numFmt on write (`Value::Date` → proper `numFmtId`)
-  - Shared strings optimization for repeated text
-
-- [ ] **Phase 9 — Worksheet iteration API**
-  - `iter_rows`, `iter_cols`, `rows`, `columns`, `values`
-  - `max_row`, `max_column`, `min_row`, `min_column`
-
-- [ ] **Phase 10 — Bulk write API**
-  - `append`, insert/delete rows/cols, `move_range`
-
-- [ ] **Phase 11 — Rich formatting**
-  - `number_format`, `alignment`, `border`, `protection`
-
-- [ ] **Phase 12 — Hyperlinks**
-  - `cell.hyperlink` read/write and sheet rel support
-
-- [ ] **Phase 13 — Comments**
-  - `cell.comment` read/write, comments XML + VML plumbing
-
-- [ ] **Phase 14 — Distribution / CI hardening**
-  - PyPI + crates.io publish workflows, wheel matrix, release automation
+- [ ] **Phase 14 — PyPI publish + CI/CD**
+  - `maturin publish` workflow for PyPI releases
+  - GitHub Actions wheel matrix for Linux, macOS, and Windows
+  - Version management — `Cargo.toml` + `pyproject.toml` in sync
+  - `crates.io` publish for the Rust library
 
 - [ ] **Phase 15 — Pandas engine / tabular adapter**
   - `engine="oxlsx"` integration via a dedicated adapter
