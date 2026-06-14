@@ -15,6 +15,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
 
 permissions:
   contents: read
@@ -97,7 +103,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-testpypi:
     name: Publish to TestPyPI (dry-run)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     environment: testpypi
@@ -121,7 +127,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     environment: pypi
@@ -145,7 +151,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-crates:
     name: Publish to crates.io
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
