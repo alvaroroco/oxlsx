@@ -37,8 +37,10 @@ jobs:
           - runner: ubuntu-latest
             target: aarch64
             manylinux: auto
-          # macOS: Intel (macos-13) + Apple Silicon (macos-14).
-          - runner: macos-13
+          # macOS: both Intel (x86_64) and Apple Silicon (aarch64) built on
+          # macos-14 (Apple Silicon) runners — x86_64 via cross-compile. This
+          # avoids the increasingly scarce/queued macos-13 Intel runners.
+          - runner: macos-14
             target: x86_64
             manylinux: ""
           - runner: macos-14
