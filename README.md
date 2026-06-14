@@ -136,26 +136,26 @@ fn main() -> Result<(), oxlsx::OxlsxError> {
 
 ## Benchmarks
 
-Measured against openpyxl 3.1.5 on the same 10k-row file (5 columns, mixed types).
+Measured against openpyxl 3.1.2 on a 10k-row file (5 columns, mixed types). Absolute numbers are machine-dependent; the ratios are what matter. Reproduce with `cargo bench` + `python3 benches/openpyxl_comparison.py`.
 
 ### Write
 
 | Operation | openpyxl | oxlsx | Speedup |
 |-----------|:--------:|:-----:|:-------:|
-| Single cell | 1.57ms | 0.16ms | **9.8x** |
-| 1k rows × 5 cols | 22.9ms | 3.1ms | **7.3x** |
-| 10k rows × 5 cols | 214.7ms | 42.7ms | **5.0x** |
-| 3 sheets × 1k rows | 35.0ms | 4.3ms | **8.1x** |
+| Single cell | 1.90ms | 0.18ms | **~10.8x** |
+| 1k rows × 5 cols | 23.2ms | 3.68ms | **~6.3x** |
+| 10k rows × 5 cols (50k cells) | 222.4ms | 54.1ms | **~4.1x** |
+| 3 sheets × 1k rows | 35.9ms | 6.80ms | **~5.3x** |
 
 ### Read (10k rows, 5 cols)
 
-| Operation | openpyxl | oxlsx | Notes |
-|-----------|:--------:|:-----:|-------|
-| Metadata only | 1.1ms | 21ms | eager `open()`; use `open_readonly()` for ~1ms streaming metadata |
-| Iterate all cells | 144.7ms | 25.5ms | **5.7x faster** |
-| Style resolution | — | **1.5ns** | `Arc<StyleSheet>` lookup |
+| Operation | openpyxl | oxlsx | Speedup |
+|-----------|:--------:|:-----:|:-------:|
+| Metadata only (`read_only` / `open_readonly()`) | 1.47ms | 0.072ms | **~20x** |
+| Open + iterate all cells | 151ms (`read_only`) / 216ms (full) | 33.4ms | **~4.5–6.5x** |
+| Eager `open()` metadata, 10k | 1.47ms | 28ms | tradeoff: eager loads the whole sheet for random access — use `open_readonly()` for streaming metadata |
 
-> Eager `open()` loads metadata in ~21ms; `open_readonly()` streams it lazily (~1ms) for large files.
+> For metadata or large-file streaming, use `open_readonly()` (lazy, ~20x faster than openpyxl). Eager `open()` loads the full sheet to enable random `ws.cell("A1")` access.
 
 Run benchmarks yourself:
 ```bash
