@@ -116,9 +116,9 @@ Complete the formatting surface to match openpyxl:
 4. `cell.protection` — locked, hidden flags
 5. Full style round-trip: open → read styles → modify → save with correct styles
 
-### ✅ Phase 12 — Comments (Hyperlinks pending)
-1. `cell.comment` — read and write plain-text comments (`xl/comments*.xml` + VML drawings) ✅
-2. 🔲 `cell.hyperlink` — read/write hyperlinks (`<hyperlink>` element + rels). Implemented on `feat/phase12a-hyperlinks` but NOT yet integrated onto the current base; pending re-integration.
+### ✅ Phase 12 — Hyperlinks and Comments
+1. `cell.hyperlink` — read/write external hyperlinks (`<hyperlinks>` element + external rels via `sheet_rels.rs`); internal `location` links + tooltip/display preserved on RMW
+2. `cell.comment` — read and write plain-text comments (`xl/comments*.xml` + VML drawings)
 
 ### ✅ Phase 13 — Freeze Panes, Print Settings, Named Ranges, Tables
 1. `ws.freeze_panes` — freeze rows/columns

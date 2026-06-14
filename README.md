@@ -6,7 +6,7 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 ## Status
 
-Active development — Phases 1–13 complete (hyperlinks pending integration). API stabilizing.
+Active development — Phases 1–13 complete. API stabilizing.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
@@ -21,9 +21,8 @@ Active development — Phases 1–13 complete (hyperlinks pending integration). 
 | 9 | Worksheet iteration API | ✅ Done |
 | 10 | Bulk write API | ✅ Done |
 | 11 | Rich formatting | ✅ Done |
-| 12 | Plain-text comments | ✅ Done |
+| 12 | Hyperlinks + plain-text comments | ✅ Done |
 | 13 | Freeze panes, print settings, named ranges, tables (lossless RMW) | ✅ Done |
-| 12a | Hyperlinks | 🔲 Pending integration (on `feat/phase12a-hyperlinks`) |
 | 14 | Distribution / CI hardening | 🔲 Planned |
 | 15 | Pandas engine / tabular adapter | 🔲 Planned |
 
@@ -108,6 +107,7 @@ fn main() -> Result<(), oxlsx::OxlsxError> {
 | `cell.font.bold` | `cell.font()?.bold` |
 | `cell.fill.fgColor` | `cell.fill()?.fg_color` |
 | `cell.comment` | `cell.comment()` / `ws.set_cell_comment(...)` |
+| `cell.hyperlink` | `cell.hyperlink()` / `ws.set_cell_hyperlink(...)` |
 | `ws.freeze_panes` | `ws.freeze_panes()` / `ws.set_freeze_panes(...)` |
 | `ws.print_area` | `ws.print_area()` / `ws.set_print_area(...)` |
 | `ws.print_title_rows` / `print_title_cols` | `ws.print_title_rows()` / `ws.print_title_cols()` (+ setters) |
@@ -194,14 +194,12 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 - [x] Iteration API (`iter_rows`/`iter_cols`/`rows`/`columns`/`values`, bounds)
 - [x] Bulk write (`append`, insert/delete rows/cols, `move_range`)
 - [x] Rich formatting (`number_format`, `alignment`, `border`, `protection`)
-- [x] Plain-text comments
+- [x] Hyperlinks + plain-text comments
 - [x] Freeze panes; print area / print titles
 - [x] Named ranges — `wb.defined_names()` (global) + `ws.defined_names()` (sheet-local), conservative lossless passthrough
 - [x] Tables — `ws.add_table()`, `ws.tables`, `TableStyleInfo`; **lossless RMW** (unmodeled table features preserved verbatim when untouched)
 
 ### 🔲 Planned
-
-- [ ] **Hyperlinks (Phase 12a)** — `cell.hyperlink` read/write; implemented on `feat/phase12a-hyperlinks` but not yet integrated onto the current base
 
 - [ ] **Phase 14 — PyPI publish + CI/CD**
   - `maturin publish` workflow for PyPI releases
