@@ -8,7 +8,7 @@ use crate::{
 };
 use chrono::Datelike;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDate, PyDateAccess, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[pymodule]
@@ -1230,7 +1230,17 @@ fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {
         Value::Number(n) => n.into_py(py),
         Value::Bool(b) => b.into_py(py),
         Value::Date(date) => {
-            PyDate::new_bound(py, date.year(), date.month() as u8, date.day() as u8)
+            // Build the date through the `datetime` module's object protocol
+            // rather than the `PyDate` C-API. The C-API datetime types are not
+            // exposed under the limited API (abi3), and this path compiles
+            // identically for both the interpreter-linked and abi3 builds while
+            // still producing a genuine `datetime.date` instance.
+            let datetime = PyModule::import_bound(py, "datetime")
+                .expect("datetime module is always available");
+            datetime
+                .getattr("date")
+                .expect("datetime.date always exists")
+                .call1((date.year(), date.month(), date.day()))
                 .expect("NaiveDate is always a valid Python date")
                 .into_py(py)
         }
@@ -1263,14 +1273,20 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::String(value));
     }
 
-    if let Ok(date) = obj.downcast::<PyDate>() {
+    // Match `datetime.date` (and its `datetime.datetime` subclass) via the
+    // object protocol instead of downcasting to the `PyDate` C-API type, which
+    // is unavailable under the limited API (abi3). `datetime.datetime` is a
+    // subclass of `datetime.date`, so `is_instance` preserves the prior
+    // `downcast::<PyDate>()` behaviour for both types.
+    let datetime = PyModule::import_bound(obj.py(), "datetime")?;
+    let date_cls = datetime.getattr("date")?;
+    if obj.is_instance(&date_cls)? {
+        let year: i32 = obj.getattr("year")?.extract()?;
+        let month: u32 = obj.getattr("month")?.extract()?;
+        let day: u32 = obj.getattr("day")?.extract()?;
         return Ok(Value::Date(
-            chrono::NaiveDate::from_ymd_opt(
-                date.get_year(),
-                date.get_month() as u32,
-                date.get_day() as u32,
-            )
-            .expect("PyDate always represents a valid date"),
+            chrono::NaiveDate::from_ymd_opt(year, month, day)
+                .expect("datetime.date always represents a valid date"),
         ));
     }
 
@@ -1291,7 +1307,11 @@ fn map_oxlsx_error(err: OxlsxError) -> PyErr {
     }
 }
 
-#[cfg(test)]
+// These tests exercise the PyO3 bindings through a real, interpreter-linked
+// build (the `python` feature enables `auto-initialize`). They use the `PyDate`
+// C-API directly, which is unavailable under the limited API (abi3), so they
+// are gated to the `python` feature and never compiled in the abi3 wheel build.
+#[cfg(all(test, feature = "python"))]
 mod tests {
     use super::{PyCell, PyWorkbook, py_to_value, value_to_py};
     use crate::Value;

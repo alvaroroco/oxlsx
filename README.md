@@ -16,14 +16,25 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 [dependencies]
 oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.1.0" }
 ```
-> Not yet on crates.io (Phase 14).
+> Published to crates.io on each GitHub release.
 
 ### Python (build from source via maturin)
+
+Prebuilt **abi3 wheels** (a single `cp38-abi3` wheel per platform, runs on CPython 3.8+) are published to PyPI on each release:
+
+```bash
+pip install oxlsx
+```
+
+To build from source, use [maturin](https://www.maturin.rs/). The wheel build (abi3 `extension-module`) is configured in `pyproject.toml`, so no extra flags are needed:
+
 ```bash
 pip install maturin
-maturin develop --features python   # or: maturin build --features python
+maturin develop --release   # install into the active venv
+# or: maturin build --release  -> target/wheels/oxlsx-0.1.0-cp38-abi3-*.whl
 ```
-> PyPI wheels are planned for Phase 14.
+
+> Contributors running the in-crate PyO3 tests use the interpreter-linked path instead: `cargo test --features python`.
 
 
 | Phase | Scope | Status |

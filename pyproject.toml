@@ -5,12 +5,33 @@ build-backend = "maturin"
 [project]
 name = "oxlsx"
 version = "0.1.0"
+description = "A fast .xlsx reader/writer with an openpyxl-style API, powered by Rust"
+authors = [{ name = "Álvaro Rodríguez", email = "alvaroroco@proton.me" }]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+    "Intended Audience :: Developers",
 ]
 
+[project.urls]
+Repository = "https://github.com/alvaroroco/oxlsx"
+
 [tool.maturin]
-features = ["python"]
+# Wheel builds use the extension-module feature: PyO3 does not link libpython
+# and abi3-py38 is enabled, so a single wheel (cp38-abi3) covers CPython 3.8+.
+features = ["extension-module"]
 module-name = "oxlsx"

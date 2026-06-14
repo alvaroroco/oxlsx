@@ -3,7 +3,7 @@ pub(crate) mod coords;
 pub(crate) mod defined_names;
 pub mod error;
 pub mod hyperlink;
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "extension-module"))]
 pub mod python;
 pub mod reader;
 pub mod readonly;

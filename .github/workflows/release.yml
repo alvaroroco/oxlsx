@@ -1,0 +1,161 @@
+name: Release
+
+# Publishing model:
+#   - GitHub Release published  -> build wheels + sdist, publish to PyPI
+#     (Trusted Publishing / OIDC) and publish the crate to crates.io.
+#   - workflow_dispatch         -> build wheels + sdist, publish to TestPyPI
+#     (Trusted Publishing / OIDC) as a dry-run. No crates.io publish.
+#
+# No API tokens are stored for PyPI/TestPyPI: publishing uses OIDC Trusted
+# Publishing through the `pypi` and `testpypi` GitHub Environments. The only
+# secret required is CARGO_REGISTRY_TOKEN (crates.io), configured by the
+# maintainer (see the publish-crates job).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build abi3 wheels (single cp38-abi3 wheel per platform, covers CPython 3.8+)
+  # ---------------------------------------------------------------------------
+  build-wheels:
+    name: wheels (${{ matrix.platform.runner }} / ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Linux: build inside manylinux containers for broad glibc compat.
+          - runner: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+          - runner: ubuntu-latest
+            target: aarch64
+            manylinux: auto
+          # macOS: Intel (macos-13) + Apple Silicon (macos-14).
+          - runner: macos-13
+            target: x86_64
+            manylinux: ""
+          - runner: macos-14
+            target: aarch64
+            manylinux: ""
+          # Windows x64.
+          - runner: windows-latest
+            target: x64
+            manylinux: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          # --release produces optimized wheels; abi3 (cp38) comes from the
+          # extension-module feature configured in pyproject.toml/Cargo.toml.
+          args: --release --out dist
+          manylinux: ${{ matrix.platform.manylinux }}
+          sccache: "true"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
+  # ---------------------------------------------------------------------------
+  # Build the source distribution (sdist)
+  # ---------------------------------------------------------------------------
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Named with the `wheels-` prefix so the publish jobs can collect
+          # every distribution with a single `wheels-*` download pattern.
+          name: wheels-sdist
+          path: dist
+
+  # ---------------------------------------------------------------------------
+  # Dry-run: publish to TestPyPI (workflow_dispatch only) via Trusted Publishing
+  # ---------------------------------------------------------------------------
+  publish-testpypi:
+    name: Publish to TestPyPI (dry-run)
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write # required for OIDC Trusted Publishing
+    steps:
+      - name: Download all distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # ---------------------------------------------------------------------------
+  # Production: publish to PyPI (release published) via Trusted Publishing
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for OIDC Trusted Publishing
+    steps:
+      - name: Download all distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        # No token: authentication is via OIDC Trusted Publishing, bound to the
+        # `pypi` environment configured on PyPI for this repository.
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ---------------------------------------------------------------------------
+  # Production: publish the Rust crate to crates.io (release published)
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish to crates.io
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo publish
+        # MAINTAINER ACTION REQUIRED: add a crates.io API token as the
+        # repository/organization secret `CARGO_REGISTRY_TOKEN`
+        # (Settings -> Secrets and variables -> Actions). Generate it at
+        # https://crates.io/settings/tokens with publish scope for `oxlsx`.
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
