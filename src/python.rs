@@ -3,8 +3,8 @@
 
 use crate::coords::rc_to_a1;
 use crate::{
-    Cell, Color, Comment, DefinedName, DefinedNames, Fill, Font, OxlsxError, StyleSheet, Table,
-    TableColumn, TableStyleInfo, Value, Workbook,
+    Cell, Color, Comment, DefinedName, DefinedNames, Fill, Font, Hyperlink, OxlsxError, StyleSheet,
+    Table, TableColumn, TableStyleInfo, Value, Workbook,
 };
 use chrono::Datelike;
 use pyo3::prelude::*;
@@ -18,6 +18,7 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorksheet>()?;
     m.add_class::<PyCell>()?;
     m.add_class::<PyComment>()?;
+    m.add_class::<PyHyperlink>()?;
     m.add_class::<PyFont>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyColor>()?;
@@ -525,6 +526,19 @@ impl PyWorksheet {
         Ok(())
     }
 
+    /// Attach an external-URL hyperlink to `coord`, mirroring openpyxl's
+    /// `cell.hyperlink = "https://..."`. Routed as a worksheet method (like
+    /// `set_cell_comment`) because `PyCell` is a value snapshot and cannot
+    /// persist a setter back to the workbook. An empty target is a no-op.
+    fn set_cell_hyperlink(&self, coord: &str, target: &str) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_hyperlink(coord, target);
+        Ok(())
+    }
+
     #[getter]
     fn freeze_panes(&self) -> PyResult<Option<String>> {
         let workbook = self.lock()?;
@@ -706,6 +720,11 @@ impl PyCell {
             .cloned()
             .map(|inner| PyComment { inner })
     }
+
+    #[getter]
+    fn hyperlink(&self) -> Option<PyHyperlink> {
+        self.inner.hyperlink().map(PyHyperlink::from)
+    }
 }
 
 #[pyclass(name = "Comment")]
@@ -723,6 +742,52 @@ impl PyComment {
     #[getter]
     fn author(&self) -> String {
         self.inner.author.clone()
+    }
+}
+
+/// openpyxl-parity `Hyperlink`: a value snapshot of a cell's hyperlink,
+/// exposing `target`/`location`/`tooltip`/`display`.
+///
+/// Mirrors `openpyxl.worksheet.hyperlink.Hyperlink`: `target` is `None` for an
+/// internal `location`-only link (Rust stores it as an empty string), so the
+/// getter normalizes empty to `None` to match openpyxl exactly.
+#[pyclass(name = "Hyperlink")]
+struct PyHyperlink {
+    inner: Hyperlink,
+}
+
+impl From<&Hyperlink> for PyHyperlink {
+    fn from(hyperlink: &Hyperlink) -> Self {
+        Self {
+            inner: hyperlink.clone(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyHyperlink {
+    #[getter]
+    fn target(&self) -> Option<String> {
+        if self.inner.target.is_empty() {
+            None
+        } else {
+            Some(self.inner.target.clone())
+        }
+    }
+
+    #[getter]
+    fn location(&self) -> Option<String> {
+        self.inner.location.clone()
+    }
+
+    #[getter]
+    fn tooltip(&self) -> Option<String> {
+        self.inner.tooltip.clone()
+    }
+
+    #[getter]
+    fn display(&self) -> Option<String> {
+        self.inner.display.clone()
     }
 }
 
@@ -1337,6 +1402,38 @@ mod tests {
 
         assert_eq!(comment.text(), "Created from rust test");
         assert_eq!(comment.author(), "Py Tester");
+    }
+
+    #[test]
+    fn py_worksheet_set_cell_hyperlink_round_trips_through_workbook_view() {
+        let workbook = PyWorkbook::new();
+        let worksheet = workbook
+            .active()
+            .unwrap()
+            .expect("workbook should have active sheet");
+
+        worksheet
+            .set_cell_hyperlink("A1", "https://example.com")
+            .unwrap();
+        let cell = worksheet.__getitem__("A1").unwrap();
+        let link = cell.hyperlink().expect("hyperlink should exist");
+
+        assert_eq!(link.target(), Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn py_hyperlink_normalizes_empty_target_to_none() {
+        // An internal location-only link stores an empty target; openpyxl
+        // surfaces that as `target is None`.
+        let py_link = super::PyHyperlink::from(&crate::Hyperlink {
+            target: String::new(),
+            location: Some("Sheet!A1".to_string()),
+            tooltip: None,
+            display: Some("Go to A1".to_string()),
+        });
+        assert_eq!(py_link.target(), None);
+        assert_eq!(py_link.location(), Some("Sheet!A1".to_string()));
+        assert_eq!(py_link.display(), Some("Go to A1".to_string()));
     }
 
     #[test]
