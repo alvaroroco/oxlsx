@@ -24,6 +24,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
 
+/// Excel 2007+ maximum row index (1-based).
+const MAX_ROW: u32 = 1_048_576;
+
+/// Excel 2007+ maximum column index (1-based; column XFD).
+const MAX_COL: u32 = 16_384;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Empty,
@@ -390,6 +396,7 @@ impl Worksheet {
     /// deliberate, documented superset of openpyxl 3.1.2, which leaves them in
     /// place (and thus visually misaligned) after a bulk op.
     pub fn insert_rows(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        Self::validate_bulk_op(Axis::Row, idx, amount, true)?;
         self.guard_tables(Axis::Row, idx)?;
         if amount > 0 {
             self.shift_axis(Axis::Row, idx, i64::from(amount));
@@ -406,6 +413,7 @@ impl Worksheet {
     /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
     /// band overlaps a table range.
     pub fn delete_rows(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        Self::validate_bulk_op(Axis::Row, idx, amount, false)?;
         self.guard_tables(Axis::Row, idx)?;
         if amount > 0 {
             self.shift_axis(Axis::Row, idx, -i64::from(amount));
@@ -420,6 +428,7 @@ impl Worksheet {
     /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
     /// affected band overlaps a table range.
     pub fn insert_cols(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        Self::validate_bulk_op(Axis::Col, idx, amount, true)?;
         self.guard_tables(Axis::Col, idx)?;
         if amount > 0 {
             self.shift_axis(Axis::Col, idx, i64::from(amount));
@@ -434,6 +443,7 @@ impl Worksheet {
     /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
     /// band overlaps a table range.
     pub fn delete_cols(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        Self::validate_bulk_op(Axis::Col, idx, amount, false)?;
         self.guard_tables(Axis::Col, idx)?;
         if amount > 0 {
             self.shift_axis(Axis::Col, idx, -i64::from(amount));
@@ -494,14 +504,40 @@ impl Worksheet {
         let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
         let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
 
-        // Compute the destination band; reject moves that fall off the grid.
-        let dest_min_col = i64::from(min_col) + cols;
-        let dest_min_row = i64::from(min_row) + rows;
-        let dest_max_col = i64::from(max_col) + cols;
-        let dest_max_row = i64::from(max_row) + rows;
+        // Compute the destination band using checked arithmetic; reject overflow
+        // and moves that fall off the grid (both lower < 1 and upper > MAX).
+        let dest_min_col = i64::from(min_col).checked_add(cols).ok_or_else(|| {
+            OxlsxError::InvalidFormat(format!(
+                "move_range column offset {cols} causes overflow for {cell_range:?}"
+            ))
+        })?;
+        let dest_min_row = i64::from(min_row).checked_add(rows).ok_or_else(|| {
+            OxlsxError::InvalidFormat(format!(
+                "move_range row offset {rows} causes overflow for {cell_range:?}"
+            ))
+        })?;
+        let dest_max_col = i64::from(max_col).checked_add(cols).ok_or_else(|| {
+            OxlsxError::InvalidFormat(format!(
+                "move_range column offset {cols} causes overflow for {cell_range:?}"
+            ))
+        })?;
+        let dest_max_row = i64::from(max_row).checked_add(rows).ok_or_else(|| {
+            OxlsxError::InvalidFormat(format!(
+                "move_range row offset {rows} causes overflow for {cell_range:?}"
+            ))
+        })?;
+
+        // Validate lower bounds (< 1).
         if dest_min_col < 1 || dest_min_row < 1 {
             return Err(OxlsxError::InvalidFormat(format!(
                 "move_range would push cells out of bounds (row/col < 1) for {cell_range:?}"
+            )));
+        }
+
+        // Validate upper bounds (> Excel max).
+        if dest_max_col > i64::from(MAX_COL) || dest_max_row > i64::from(MAX_ROW) {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "move_range would push cells past Excel limits (max row={MAX_ROW}, max col={MAX_COL}) for {cell_range:?}"
             )));
         }
 
@@ -515,27 +551,98 @@ impl Worksheet {
             dest_max_row as u32,
         )?;
 
-        // Collect (and remove) every source cell, re-keying it to the offset.
+        // Phase 1: Collect cells to move AND build the set of ALL destination refs
+        // (whether or not the source was present). This two-phase approach ensures
+        // empty source cells clear their destination (openpyxl parity) and handles
+        // source/dest overlap correctly (sources extracted before clearing).
         let width = (max_col - min_col + 1) as usize;
         let height = (max_row - min_row + 1) as usize;
         let mut moved = Vec::with_capacity(width * height);
+        let mut dest_refs = std::collections::HashSet::with_capacity(width * height);
+
         for row in min_row..=max_row {
             for col in min_col..=max_col {
                 let src_ref = rc_to_a1(row, col);
+                let dest_ref = rc_to_a1(
+                    (i64::from(row) + rows) as u32,
+                    (i64::from(col) + cols) as u32,
+                );
+
+                // Record every destination ref (clears stale cells even when source empty).
+                dest_refs.insert(dest_ref.clone());
+
+                // Collect present source cells for relocation.
                 if let Some(mut cell) = self.cells.remove(&src_ref) {
-                    let new_ref = rc_to_a1(
-                        (i64::from(row) + rows) as u32,
-                        (i64::from(col) + cols) as u32,
-                    );
-                    cell.reference = new_ref.clone();
-                    moved.push((new_ref, cell));
+                    cell.reference = dest_ref.clone();
+                    moved.push((dest_ref, cell));
                 }
             }
         }
 
-        // Write at the destination, overwriting any existing cells there.
+        // Phase 2: Clear ALL destination refs (handling empty sources), then insert moved cells.
+        for dest_ref in &dest_refs {
+            self.cells.remove(dest_ref);
+        }
         for (reference, cell) in moved {
             self.cells.insert(reference, cell);
+        }
+
+        Ok(())
+    }
+
+    /// Validate Excel grid bounds for bulk operations (insert/delete rows/cols).
+    /// Reject idx < 1, idx > max, or operations that would push cells past Excel
+    /// limits. `amount == 0` is allowed (no-op, openpyxl parity). Enforces
+    /// atomicity: all validation BEFORE any mutation.
+    fn validate_bulk_op(
+        axis: Axis,
+        idx: u32,
+        amount: u32,
+        is_insert: bool,
+    ) -> Result<(), OxlsxError> {
+        let (max_idx, axis_name) = match axis {
+            Axis::Row => (MAX_ROW, "row"),
+            Axis::Col => (MAX_COL, "column"),
+        };
+
+        if idx < 1 {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "{axis_name} index {idx} out of bounds; must be >= 1"
+            )));
+        }
+
+        if idx > max_idx {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "{axis_name} index {idx} out of bounds; maximum is {max_idx}"
+            )));
+        }
+
+        // amount == 0 is a no-op (openpyxl parity); skip overflow checks.
+        if amount == 0 {
+            return Ok(());
+        }
+
+        // For insert, check if idx + amount would exceed the maximum.
+        // Use checked_add to detect overflow.
+        if is_insert {
+            if let Some(end) = idx.checked_add(amount) {
+                if end > max_idx {
+                    return Err(OxlsxError::InvalidFormat(format!(
+                        "{axis_name} insert at {idx} with amount {amount} would exceed maximum {max_idx}"
+                    )));
+                }
+            } else {
+                return Err(OxlsxError::InvalidFormat(format!(
+                    "{axis_name} insert at {idx} with amount {amount} causes overflow"
+                )));
+            }
+        } else {
+            // For delete, check if idx + amount would overflow (defensive).
+            if idx.checked_add(amount).is_none() {
+                return Err(OxlsxError::InvalidFormat(format!(
+                    "{axis_name} delete at {idx} with amount {amount} causes overflow"
+                )));
+            }
         }
 
         Ok(())
@@ -935,34 +1042,40 @@ enum Axis {
 /// `delta < 0` deletes `-delta` indices from `start` (indices inside the
 /// removed band return `None`; later indices move down). Indices before `start`
 /// are returned unchanged.
+///
+/// Uses checked arithmetic; overflow returns `None` (defensive fail-safe, should
+/// never occur after validate_bulk_op guards in the public APIs).
 fn remap_index(index: u32, start: u32, delta: i64) -> Option<u32> {
     if index < start {
         return Some(index);
     }
     if delta >= 0 {
-        return Some(index + delta as u32);
+        // Insert: checked_add protects against overflow.
+        return index.checked_add(delta as u32);
     }
     let amount = (-delta) as u32;
-    if index < start + amount {
-        None
+    // Delete: checked_add for band_end check.
+    let band_end = start.checked_add(amount)?.checked_sub(1)?;
+    if index <= band_end {
+        None // Inside deleted band.
     } else {
-        Some(index - amount)
+        index.checked_sub(amount)
     }
 }
 
 /// Shift an inclusive `[span_start, span_end]` range for a merged cell along the
 /// active axis. Returns `None` when a delete drops the range (it straddles or
-/// sits inside the removed band).
+/// sits inside the removed band). Uses checked arithmetic; overflow returns `None`.
 fn shift_span(span_start: u32, span_end: u32, start: u32, delta: i64) -> Option<(u32, u32)> {
     if delta >= 0 {
         let amount = delta as u32;
         let new_start = if span_start >= start {
-            span_start + amount
+            span_start.checked_add(amount)?
         } else {
             span_start
         };
         let new_end = if span_end >= start {
-            span_end + amount
+            span_end.checked_add(amount)?
         } else {
             span_end
         };
@@ -970,11 +1083,14 @@ fn shift_span(span_start: u32, span_end: u32, start: u32, delta: i64) -> Option<
     }
 
     let amount = (-delta) as u32;
-    let band_end = start + amount - 1;
+    let band_end = start.checked_add(amount)?.checked_sub(1)?;
     if span_end < start {
         Some((span_start, span_end)) // fully before the deleted band
     } else if span_start > band_end {
-        Some((span_start - amount, span_end - amount)) // fully after
+        Some((
+            span_start.checked_sub(amount)?,
+            span_end.checked_sub(amount)?,
+        )) // fully after
     } else {
         None // straddles or sits inside the deleted band -> drop
     }
@@ -2714,5 +2830,159 @@ mod tests {
         let err = ws.move_range("A1:B2", 0, -1, false).unwrap_err();
         assert!(matches!(err, OxlsxError::InvalidFormat(_)));
         assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
+    }
+
+    // ---- C1: move_range must clear destination when source is empty ----
+
+    #[test]
+    fn move_range_clears_dest_when_source_empty() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "x");
+        ws.set_cell("D1", "stale");
+
+        // Move A1:B1 (+2 cols) -> C1:D1. A1 has data, B1 is empty.
+        // C1 should get "x", D1 should be CLEARED (not keep "stale").
+        ws.move_range("A1:B1", 0, 2, false).unwrap();
+
+        assert!(ws.cell("A1").is_none(), "A1 should be cleared (source)");
+        assert_eq!(
+            ws.cell("C1").unwrap().value(),
+            &s("x"),
+            "C1 should have moved value"
+        );
+        assert!(
+            ws.cell("D1").is_none(),
+            "D1 should be cleared even though B1 was empty"
+        );
+    }
+
+    // ---- C2: unchecked arithmetic in delete/insert operations ----
+
+    #[test]
+    fn delete_rows_rejects_huge_amount() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "keep");
+        ws.set_cell("A2", "also keep");
+
+        // Attempting to delete u32::MAX rows from row 2 → overflow; reject with Err.
+        let err = ws.delete_rows(2, u32::MAX).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+
+        // Worksheet unchanged.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("keep"));
+        assert_eq!(ws.cell("A2").unwrap().value(), &s("also keep"));
+    }
+
+    #[test]
+    fn insert_rows_rejects_out_of_grid() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+
+        // Inserting at row 1_048_576 with amount=2 would push past Excel max row.
+        let err = ws.insert_rows(1_048_576, 2).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+
+        // Inserting at row 1_048_577 (already past max) → Err.
+        let err = ws.insert_rows(1_048_577, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn insert_cols_rejects_out_of_grid() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+
+        // Inserting at col 16_384 (XFD) with amount=2 → past max col.
+        let err = ws.insert_cols(16_384, 2).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+
+        // Inserting at col 16_385 (past XFD) → Err.
+        let err = ws.insert_cols(16_385, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn bulk_ops_reject_idx_zero() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+
+        let err = ws.insert_rows(0, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+
+        let err = ws.delete_rows(0, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+
+        let err = ws.insert_cols(0, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+
+        let err = ws.delete_cols(0, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+
+        // Worksheet unchanged.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+    }
+
+    #[test]
+    fn bulk_ops_amount_zero_is_noop() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+        ws.set_cell("B2", "other");
+
+        // amount=0 should be a no-op (openpyxl parity).
+        ws.insert_rows(1, 0).unwrap();
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("other"));
+        assert_eq!(ws.max_row(), 2);
+
+        ws.delete_rows(1, 0).unwrap();
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("other"));
+        assert_eq!(ws.max_row(), 2);
+
+        ws.insert_cols(1, 0).unwrap();
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("other"));
+        assert_eq!(ws.max_row(), 2);
+
+        ws.delete_cols(1, 0).unwrap();
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("other"));
+        assert_eq!(ws.max_row(), 2);
+    }
+
+    // ---- C3: move_range i64 overflow/bounds checking ----
+
+    #[test]
+    fn move_range_rejects_extreme_offset() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+
+        // cols=i64::MAX would overflow i64::from(max_col) + cols.
+        let err = ws.move_range("A1", 0, i64::MAX, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+
+        // rows=i64::MAX would overflow similarly.
+        let err = ws.move_range("A1", i64::MAX, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+    }
+
+    #[test]
+    fn move_range_rejects_out_of_grid_upper() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "data");
+
+        // Move that would exceed column XFD (16_384) → Err.
+        let err = ws.move_range("A1", 0, 16_384, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+
+        // Move that would exceed row 1_048_576 → Err.
+        let err = ws.move_range("A1", 1_048_576, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
     }
 }

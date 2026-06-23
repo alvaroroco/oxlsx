@@ -1859,20 +1859,31 @@ fn append_values_from_py(iterable: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
 /// Resolve a single `dict` key from `ws.append({...})` into a 1-based column
 /// index. Integer keys are used directly (openpyxl semantics); string keys are
 /// parsed as column letters. Mirrors openpyxl by raising `ValueError` on a
-/// column index `< 1`, an unparsable letter, or an unsupported key type.
+/// column index `< 1`, `> 16_384` (Excel max column XFD), an unparsable letter,
+/// or an unsupported key type. The upper-bound cap prevents OOM on huge keys.
 fn append_column_from_key(key: &Bound<'_, PyAny>) -> PyResult<u32> {
+    const MAX_EXCEL_COL: u32 = 16_384; // Column XFD.
+
     if let Ok(letters) = key.extract::<String>() {
-        return column_index_from_letters(&letters).ok_or_else(|| {
+        let col = column_index_from_letters(&letters).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!("{letters:?} is not a valid column"))
-        });
+        })?;
+        if col > MAX_EXCEL_COL {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "column {letters:?} (index {col}) exceeds maximum (XFD / {MAX_EXCEL_COL})"
+            )));
+        }
+        return Ok(col);
     }
 
     if let Ok(index) = key.extract::<i64>() {
-        if index < 1 {
+        // Validate bounds on i64 BEFORE casting to prevent truncation.
+        if index < 1 || index > i64::from(MAX_EXCEL_COL) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "column index {index} out of bounds; must be >= 1"
+                "column index {index} out of bounds; must be >= 1 and <= {MAX_EXCEL_COL}"
             )));
         }
+        // Now safe to cast: index is in [1, 16_384].
         return Ok(index as u32);
     }
 
