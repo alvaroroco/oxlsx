@@ -6,7 +6,27 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 ## Status
 
-**v0.1.1 released** — feature-complete (phases 1–13) + bulk write, conditional formatting, sheet auto-filter, `PatternFill`, column utils, and `dataframe_to_rows`.
+**v0.1.1 — released on [PyPI](https://pypi.org/project/oxlsx/) and [crates.io](https://crates.io/crates/oxlsx).** Feature-complete (phases 1–14) plus the openpyxl-migration additions below.
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | ZIP parsing, styles, `cell.font()` / `cell.fill()` | ✅ Done |
+| 2 | Shared strings, `Value::String/Bool`, `cell.text()` | ✅ Done |
+| 3 | Multi-sheet, `Value::Date`, openpyxl API parity | ✅ Done |
+| 4 | Write support — `Workbook::new()` + `wb.save()` | ✅ Done |
+| 5 | Lazy / streaming reader (`open_readonly()`) | ✅ Done |
+| 6 | PyO3 Python bindings | ✅ Done |
+| 7 | Read-modify-write (open + edit + save) | ✅ Done |
+| 8 | Extended write features | ✅ Done |
+| 9 | Worksheet iteration API | ✅ Done |
+| 10 | Bulk write (`append`, insert/delete rows/cols, `move_range`) | ✅ Done |
+| 11 | Rich formatting | ✅ Done |
+| 12 | Hyperlinks + plain-text comments | ✅ Done |
+| 13 | Freeze panes, print settings, named ranges, tables (lossless RMW) | ✅ Done |
+| 14 | Distribution — abi3 wheels, PyPI + crates.io, release CI | ✅ Done |
+| 15 | Pandas engine / tabular adapter | 🔲 Planned |
+
+**openpyxl-migration additions (v0.1.1):** conditional formatting (`FormulaRule` / `CellIsRule`), sheet `auto_filter`, `PatternFill`, `get_column_letter` / `column_index_from_string`, and `dataframe_to_rows`.
 
 ## Install
 
@@ -14,9 +34,9 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 ```toml
 # Cargo.toml
 [dependencies]
-oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.1.0" }
+oxlsx = "0.1.1"
 ```
-> Published to crates.io on each GitHub release.
+> Or pin to a tag from git: `oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.1.1" }`
 
 ### Python (build from source via maturin)
 
@@ -31,29 +51,10 @@ To build from source, use [maturin](https://www.maturin.rs/). The wheel build (a
 ```bash
 pip install maturin
 maturin develop --release   # install into the active venv
-# or: maturin build --release  -> target/wheels/oxlsx-0.1.0-cp38-abi3-*.whl
+# or: maturin build --release  -> target/wheels/oxlsx-0.1.1-cp38-abi3-*.whl
 ```
 
 > Contributors running the in-crate PyO3 tests use the interpreter-linked path instead: `cargo test --features python`.
-
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | ZIP parsing, styles, `cell.font()` / `cell.fill()` | ✅ Done |
-| 2 | Shared strings, `Value::String/Bool`, `cell.text()` | ✅ Done |
-| 3 | Multi-sheet, `Value::Date`, openpyxl API parity | ✅ Done |
-| 4 | Write support — `Workbook::new()` + `wb.save()` | ✅ Done |
-| 5 | Lazy / streaming reader (`open_readonly()`) | ✅ Done |
-| 6 | PyO3 Python bindings | ✅ Done |
-| 7 | Read-modify-write (open + edit + save) | ✅ Done |
-| 8 | Extended write features | ✅ Done |
-| 9 | Worksheet iteration API | ✅ Done |
-| 10 | Bulk write API (`append`, insert/delete rows/cols, `move_range`) | ✅ Done |
-| 11 | Rich formatting | ✅ Done |
-| 12 | Hyperlinks + plain-text comments | ✅ Done |
-| 13 | Freeze panes, print settings, named ranges, tables (lossless RMW) | ✅ Done |
-| 14 | Distribution / CI hardening | 🔲 Planned |
-| 15 | Pandas engine / tabular adapter | 🔲 Planned |
 
 ## Usage
 
@@ -143,6 +144,14 @@ fn main() -> Result<(), oxlsx::OxlsxError> {
 | `wb.defined_names` | `wb.defined_names()` (global) / `ws.defined_names()` (sheet-local) |
 | `ws.add_table(Table(...))` | `ws.add_table(Table::new(...))` |
 | `ws.tables` / `del ws.tables["T"]` | `ws.tables()` / `ws.remove_table("T")` |
+| `ws.append([...])` / `ws.append({...})` | `ws.append([...])` (Python also accepts a dict: column letters or 1-based ints) |
+| `ws.insert_rows/delete_rows/insert_cols/delete_cols(idx, amount)` | same names + signatures (1-based `idx`, `amount=1`) |
+| `ws.move_range(range, rows, cols, translate)` | `ws.move_range(range, rows, cols, translate)` (`translate=True` → `NotImplementedError`) |
+| `ws.auto_filter.ref = "A1:D10"` | `ws.auto_filter().ref` / Python `ws.auto_filter.ref = ...` |
+| `cell.fill = PatternFill(...)` | `PatternFill(...)` + `ws.set_cell_fill(coord, fill)` |
+| `ws.conditional_formatting.add(range, FormulaRule(...))` | same (Python); `FormulaRule`, `CellIsRule` |
+| `get_column_letter(i)` / `column_index_from_string(s)` | `oxlsx.get_column_letter(i)` / `oxlsx.column_index_from_string(s)` |
+| `dataframe_to_rows(df, index, header)` | `oxlsx.dataframe_to_rows(df, index, header)` |
 | `wb.save("out.xlsx")` | `wb.save("out.xlsx")` |
 
 ## Benchmarks
@@ -189,6 +198,8 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 | `Color` | `Argb(String) \| Indexed(u32) \| Theme(u32)` |
 | `DefinedName` | Named range — `name`, `value` (+ `comment`, `hidden`); global or sheet-local |
 | `Table` | Worksheet table — `display_name`, `ref`, `columns`, optional `TableStyleInfo`; lossless RMW for unmodeled features |
+| `Dxf` | Differential format (fill / font) referenced by conditional-formatting rules |
+| `ConditionalFormatting` | Per-`sqref` rules — `FormulaRule` (expression) / `CellIsRule` (operator); unmodeled rules (color scales, etc.) preserved verbatim on RMW |
 
 ## Architecture
 
@@ -227,14 +238,12 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 - [x] Freeze panes; print area / print titles
 - [x] Named ranges — `wb.defined_names()` (global) + `ws.defined_names()` (sheet-local), conservative lossless passthrough
 - [x] Tables — `ws.add_table()`, `ws.tables`, `TableStyleInfo`; **lossless RMW** (unmodeled table features preserved verbatim when untouched)
+- [x] Conditional formatting — `FormulaRule` / `CellIsRule` + `Dxf`; RMW-preserving (unmodeled rules kept verbatim)
+- [x] Sheet `auto_filter`; `PatternFill` + `ws.set_cell_fill`
+- [x] Utils — `get_column_letter`, `column_index_from_string`, `dataframe_to_rows`
+- [x] Distribution — abi3 wheels (CPython 3.8+), PyPI + crates.io, OIDC trusted publishing, release CI
 
 ### 🔲 Planned
-
-- [ ] **Phase 14 — PyPI publish + CI/CD**
-  - `maturin publish` workflow for PyPI releases
-  - GitHub Actions wheel matrix for Linux, macOS, and Windows
-  - Version management — `Cargo.toml` + `pyproject.toml` in sync
-  - `crates.io` publish for the Rust library
 
 - [ ] **Phase 15 — Pandas engine / tabular adapter**
   - `engine="oxlsx"` integration via a dedicated adapter
