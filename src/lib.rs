@@ -23,5 +23,5 @@ pub use reader::Value;
 pub use reader::{Cell, Workbook, Worksheet};
 pub use readonly::{ReadonlyWorkbook, ReadonlyWorksheet, RowIter};
 pub use shared_strings::SharedStrings;
-pub use styles::{Color, Fill, Font, StyleId, StyleSheet};
+pub use styles::{Color, Dxf, Fill, Font, StyleId, StyleSheet};
 pub use table::{Table, TableColumn, TableStyleInfo};

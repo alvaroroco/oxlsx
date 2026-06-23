@@ -1,6 +1,6 @@
 use crate::styles::CellXf;
 use crate::{
-    Color, Comment, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value, Workbook, Worksheet,
+    Color, Comment, Dxf, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value, Workbook, Worksheet,
     defined_names, sheet_rels,
 };
 use chrono::NaiveDate;
@@ -21,6 +21,7 @@ pub(crate) struct CollectedStyles {
     pub fills: Vec<Fill>,
     pub cell_xfs: Vec<CellXf>,
     pub num_fmts: Vec<(u32, String)>,
+    pub dxfs: Vec<Dxf>,
     pub cell_style_ids: HashMap<(usize, String), u32>,
 }
 
@@ -171,6 +172,18 @@ pub(crate) fn collect_styles(
         }
     }
 
+    // Seed the dxf registry from the source on RMW so conditional-formatting
+    // differential formats survive a re-save. Fresh workbooks start empty; the
+    // empty registry gates `<dxfs>` emission off entirely (byte-identical
+    // styles.xml for all no-CF files).
+    let dxfs = if preserve_original {
+        original
+            .map(|source| source.dxfs.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     num_fmts.sort_by_key(|(id, _)| *id);
 
     CollectedStyles {
@@ -178,6 +191,7 @@ pub(crate) fn collect_styles(
         fills,
         cell_xfs,
         num_fmts,
+        dxfs,
         cell_style_ids,
     }
 }
@@ -1040,6 +1054,17 @@ fn write_styles_xml(
     )?;
     write_end(&mut xml, "cellStyles")?;
 
+    // `<dxfs>` follows `<cellStyles>` in CT_Stylesheet child order. Emit it ONLY
+    // when the registry is non-empty so no-CF files stay byte-identical.
+    if !collected.dxfs.is_empty() {
+        let count = collected.dxfs.len().to_string();
+        write_start(&mut xml, "dxfs", &[("count", count.as_str())])?;
+        for dxf in &collected.dxfs {
+            write_dxf(&mut xml, dxf)?;
+        }
+        write_end(&mut xml, "dxfs")?;
+    }
+
     write_end(&mut xml, "styleSheet")?;
     write_zip_entry(zip, options, "xl/styles.xml", xml.into_inner())
 }
@@ -1085,6 +1110,60 @@ pub(crate) fn write_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), O
         write_color(xml, "fgColor", color)?;
     }
 
+    write_end(xml, "patternFill")?;
+    write_end(xml, "fill")
+}
+
+/// Serialize one `<dxf>` (conditional-formatting differential format) matching
+/// openpyxl's shape: optional `<font>` then optional `<fill>`. Unlike cell
+/// fonts/fills, a dxf only emits the properties it actually overrides — no
+/// default `sz`/`name` injection — and its fill emits BOTH `fgColor` and
+/// `bgColor`.
+fn write_dxf(xml: &mut Writer<Vec<u8>>, dxf: &Dxf) -> Result<(), OxlsxError> {
+    write_start(xml, "dxf", &[])?;
+    if let Some(font) = &dxf.font {
+        write_dxf_font(xml, font)?;
+    }
+    if let Some(fill) = &dxf.fill {
+        write_dxf_fill(xml, fill)?;
+    }
+    write_end(xml, "dxf")
+}
+
+fn write_dxf_font(xml: &mut Writer<Vec<u8>>, font: &Font) -> Result<(), OxlsxError> {
+    write_start(xml, "font", &[])?;
+    if font.bold {
+        write_empty(xml, "b", &[("val", "1")])?;
+    }
+    if font.italic {
+        write_empty(xml, "i", &[("val", "1")])?;
+    }
+    if font.size > 0.0 {
+        let size = font.size.to_string();
+        write_empty(xml, "sz", &[("val", size.as_str())])?;
+    }
+    if !font.name.is_empty() {
+        write_empty(xml, "name", &[("val", font.name.as_str())])?;
+    }
+    if let Some(color) = &font.color {
+        write_color(xml, "color", color)?;
+    }
+    write_end(xml, "font")
+}
+
+fn write_dxf_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), OxlsxError> {
+    write_start(xml, "fill", &[])?;
+    write_start(
+        xml,
+        "patternFill",
+        &[("patternType", fill.pattern_type.as_str())],
+    )?;
+    if let Some(color) = &fill.fg_color {
+        write_color(xml, "fgColor", color)?;
+    }
+    if let Some(color) = &fill.bg_color {
+        write_color(xml, "bgColor", color)?;
+    }
     write_end(xml, "patternFill")?;
     write_end(xml, "fill")
 }

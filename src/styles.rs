@@ -94,11 +94,25 @@ pub struct CellXf {
     pub num_fmt_id: u32,
 }
 
+/// A differential format (`<dxf>`) used by conditional formatting rules.
+///
+/// Only the differential properties that oxlsx models are captured: an optional
+/// font override and an optional fill override. Both reuse the existing
+/// [`Font`] / [`Fill`] types so the writer can share serialization helpers.
+/// `PartialEq` (not `Eq`, because [`Font`] carries an `f64` size) backs the
+/// `find-or-push` deduplication that mirrors openpyxl's `dxfId` assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dxf {
+    pub font: Option<Font>,
+    pub fill: Option<Fill>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StyleSheet {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
     pub cell_xfs: Vec<CellXf>,
+    pub dxfs: Vec<Dxf>,
     num_fmts: HashMap<u32, String>,
 }
 
@@ -117,8 +131,23 @@ impl StyleSheet {
         let mut in_pattern_fill = false;
         let mut in_num_fmts = false;
 
+        // `<dxfs>` parsing state. `<dxfs>` follows `<cellStyles>` in CT_Stylesheet,
+        // so the main `in_fonts` / `in_fills` flags are already closed here and the
+        // dxf-scoped flags below never overlap with them.
+        let mut in_dxfs = false;
+        let mut in_dxf = false;
+        let mut in_dxf_font = false;
+        let mut in_dxf_fill = false;
+        let mut in_dxf_pattern_fill = false;
+
         let mut cur_font = Font::default();
         let mut cur_fill = Fill::default();
+        let mut cur_dxf = Dxf {
+            font: None,
+            fill: None,
+        };
+        let mut cur_dxf_font = Font::default();
+        let mut cur_dxf_fill = Fill::default();
 
         let mut sheet = StyleSheet::default();
 
@@ -189,6 +218,46 @@ impl StyleSheet {
                             sheet.num_fmts.insert(num_fmt_id, format_code);
                         }
                     }
+                    b"dxfs" => in_dxfs = true,
+                    b"dxf" if in_dxfs => {
+                        in_dxf = true;
+                        cur_dxf = Dxf {
+                            font: None,
+                            fill: None,
+                        };
+                    }
+                    b"font" if in_dxf => {
+                        in_dxf_font = true;
+                        cur_dxf_font = Font::default();
+                    }
+                    b"fill" if in_dxf => {
+                        in_dxf_fill = true;
+                        cur_dxf_fill = Fill::default();
+                    }
+                    b"patternFill" if in_dxf_fill => {
+                        in_dxf_pattern_fill = true;
+                        cur_dxf_fill.pattern_type =
+                            attr_value(&e, b"patternType")?.unwrap_or_else(|| "none".to_string());
+                    }
+                    b"sz" if in_dxf_font => {
+                        if let Some(val) = attr_value(&e, b"val")? {
+                            cur_dxf_font.size = val.parse().unwrap_or(0.0);
+                        }
+                    }
+                    b"name" if in_dxf_font => {
+                        if let Some(val) = attr_value(&e, b"val")? {
+                            cur_dxf_font.name = val;
+                        }
+                    }
+                    b"color" if in_dxf_font => {
+                        cur_dxf_font.color = parse_color(&e)?;
+                    }
+                    b"fgColor" if in_dxf_pattern_fill => {
+                        cur_dxf_fill.fg_color = parse_color(&e)?;
+                    }
+                    b"bgColor" if in_dxf_pattern_fill => {
+                        cur_dxf_fill.bg_color = parse_color(&e)?;
+                    }
                     _ => {}
                 },
                 Event::Empty(e) => match e.local_name().as_ref() {
@@ -234,6 +303,27 @@ impl StyleSheet {
                             sheet.num_fmts.insert(num_fmt_id, format_code);
                         }
                     }
+                    b"b" if in_dxf_font => cur_dxf_font.bold = true,
+                    b"i" if in_dxf_font => cur_dxf_font.italic = true,
+                    b"sz" if in_dxf_font => {
+                        if let Some(val) = attr_value(&e, b"val")? {
+                            cur_dxf_font.size = val.parse().unwrap_or(0.0);
+                        }
+                    }
+                    b"name" if in_dxf_font => {
+                        if let Some(val) = attr_value(&e, b"val")? {
+                            cur_dxf_font.name = val;
+                        }
+                    }
+                    b"color" if in_dxf_font => {
+                        cur_dxf_font.color = parse_color(&e)?;
+                    }
+                    b"patternFill" if in_dxf_fill => {
+                        cur_dxf_fill.pattern_type =
+                            attr_value(&e, b"patternType")?.unwrap_or_else(|| "none".to_string());
+                    }
+                    b"fgColor" if in_dxf_pattern_fill => cur_dxf_fill.fg_color = parse_color(&e)?,
+                    b"bgColor" if in_dxf_pattern_fill => cur_dxf_fill.bg_color = parse_color(&e)?,
                     _ => {}
                 },
                 Event::End(e) => match e.local_name().as_ref() {
@@ -246,11 +336,34 @@ impl StyleSheet {
                         in_pattern_fill = false;
                         sheet.fills.push(std::mem::take(&mut cur_fill));
                     }
-                    b"patternFill" => in_pattern_fill = false,
+                    b"font" if in_dxf_font => {
+                        in_dxf_font = false;
+                        cur_dxf.font = Some(std::mem::take(&mut cur_dxf_font));
+                    }
+                    b"fill" if in_dxf_fill => {
+                        in_dxf_fill = false;
+                        in_dxf_pattern_fill = false;
+                        cur_dxf.fill = Some(std::mem::take(&mut cur_dxf_fill));
+                    }
+                    b"dxf" if in_dxf => {
+                        in_dxf = false;
+                        sheet.dxfs.push(std::mem::replace(
+                            &mut cur_dxf,
+                            Dxf {
+                                font: None,
+                                fill: None,
+                            },
+                        ));
+                    }
+                    b"patternFill" => {
+                        in_pattern_fill = false;
+                        in_dxf_pattern_fill = false;
+                    }
                     b"fonts" => in_fonts = false,
                     b"fills" => in_fills = false,
                     b"cellXfs" => in_cell_xfs = false,
                     b"numFmts" => in_num_fmts = false,
+                    b"dxfs" => in_dxfs = false,
                     _ => {}
                 },
                 Event::Eof => break,
@@ -297,6 +410,20 @@ impl StyleSheet {
             .map(|(num_fmt_id, format_code)| (*num_fmt_id, format_code.clone()))
             .collect()
     }
+
+    /// Return the `dxfId` for `dxf`, reusing an existing entry when an equal
+    /// [`Dxf`] is already registered (deduplication), otherwise appending it.
+    ///
+    /// Mirrors openpyxl, which shares one `dxfId` across rules with identical
+    /// differential formats.
+    pub fn find_or_push_dxf(&mut self, dxf: Dxf) -> usize {
+        if let Some(idx) = self.dxfs.iter().position(|existing| existing == &dxf) {
+            idx
+        } else {
+            self.dxfs.push(dxf);
+            self.dxfs.len() - 1
+        }
+    }
 }
 
 fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
@@ -319,7 +446,7 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, StyleId, StyleSheet};
+    use super::{Color, Dxf, Fill, Font, StyleId, StyleSheet};
     use std::io::Cursor;
 
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -369,6 +496,70 @@ mod tests {
             sheet.font(StyleId(2)).unwrap().color,
             Some(Color::Indexed(4))
         );
+    }
+
+    const SAMPLE_DXFS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+  <dxfs count="2">
+    <dxf><font><b val="1"/><color rgb="009C0006"/></font></dxf>
+    <dxf><fill><patternFill patternType="solid"><fgColor rgb="00FFC7CE"/><bgColor rgb="00FFC7CE"/></patternFill></fill></dxf>
+  </dxfs>
+</styleSheet>"#;
+
+    #[test]
+    fn dxf_find_or_push_dedups() {
+        let mut sheet = StyleSheet::default();
+        let red = Dxf {
+            font: None,
+            fill: Some(Fill {
+                pattern_type: "solid".to_string(),
+                fg_color: Some(Color::Argb("00FFC7CE".to_string())),
+                bg_color: Some(Color::Argb("00FFC7CE".to_string())),
+            }),
+        };
+
+        let id1 = sheet.find_or_push_dxf(red.clone());
+        let id2 = sheet.find_or_push_dxf(red.clone());
+        assert_eq!(id1, 0, "first push gets dxfId 0");
+        assert_eq!(id2, 0, "equal dxf dedups to the existing id");
+        assert_eq!(sheet.dxfs.len(), 1, "no duplicate stored");
+
+        let bold = Dxf {
+            font: Some(Font {
+                bold: true,
+                ..Font::default()
+            }),
+            fill: None,
+        };
+        let id3 = sheet.find_or_push_dxf(bold);
+        assert_eq!(id3, 1, "a different dxf gets a new id");
+        assert_eq!(sheet.dxfs.len(), 2);
+    }
+
+    #[test]
+    fn stylesheet_parses_dxfs() {
+        let sheet = StyleSheet::parse(Cursor::new(SAMPLE_DXFS_XML.as_bytes())).unwrap();
+
+        assert_eq!(sheet.dxfs.len(), 2);
+
+        let font_dxf = &sheet.dxfs[0];
+        assert!(font_dxf.fill.is_none());
+        let font = font_dxf.font.as_ref().expect("font dxf has a font");
+        assert!(font.bold);
+        assert_eq!(font.color, Some(Color::Argb("009C0006".to_string())));
+
+        let fill_dxf = &sheet.dxfs[1];
+        assert!(fill_dxf.font.is_none());
+        let fill = fill_dxf.fill.as_ref().expect("fill dxf has a fill");
+        assert_eq!(fill.pattern_type, "solid");
+        assert_eq!(fill.fg_color, Some(Color::Argb("00FFC7CE".to_string())));
+        assert_eq!(fill.bg_color, Some(Color::Argb("00FFC7CE".to_string())));
     }
 
     #[test]

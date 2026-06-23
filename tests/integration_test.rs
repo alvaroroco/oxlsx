@@ -2717,3 +2717,91 @@ fn auto_filter_rmw_preserves() {
 
     fs::remove_file(path).ok();
 }
+
+// --- Conditional formatting Slice 1: Dxf infra + gated <dxfs> emission ------
+
+/// Empty dxf registry MUST emit NOTHING: a workbook with no conditional
+/// formatting writes no `<dxfs>` in styles.xml, keeping output byte-identical to
+/// the pre-CF behavior. Explicitly re-checks the tables_totals byte-equality
+/// discriminator so a regression here surfaces in the same test.
+#[test]
+fn no_cf_keeps_styles_byte_identical() {
+    let path = temp_path("oxlsx_no_cf_styles.xlsx");
+    fs::copy("samples/tables_totals.xlsx", &path).unwrap();
+
+    // tables_totals.xlsx has NO conditional formatting and NO <dxfs>.
+    let source_styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        !source_styles.contains("<dxfs"),
+        "fixture must have no dxfs"
+    );
+    let original_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+
+    let mut wb = Workbook::open(&path).unwrap();
+    wb.active_mut().unwrap().set_cell("H10", "unrelated");
+    wb.save(&path).unwrap();
+
+    // The empty registry gate must keep <dxfs> out of styles.xml entirely.
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        !styles_xml.contains("<dxfs"),
+        "no-CF workbook must not emit <dxfs>: {styles_xml}"
+    );
+
+    // Byte-equality discriminator: the clean table is re-emitted verbatim.
+    let saved_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+    assert_eq!(
+        saved_table1, original_table1,
+        "clean table must stay byte-for-byte after RMW"
+    );
+
+    // Reopens cleanly.
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
+
+/// RMW preserves source `<dxfs>`: opening an openpyxl-authored file that already
+/// has a dxf, editing an unrelated cell, and saving keeps the dxf in styles.xml
+/// (count unchanged, fill colors intact).
+#[test]
+fn rmw_preserves_source_dxfs() {
+    let path = temp_path("oxlsx_rmw_dxfs.xlsx");
+    fs::copy("samples/conditional_format.xlsx", &path).unwrap();
+
+    // The fixture has exactly one dxf with a solid FFC7CE fill.
+    let source_styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        source_styles.contains("<dxfs count=\"1\""),
+        "fixture must start with one dxf: {source_styles}"
+    );
+
+    let mut wb = Workbook::open(&path).unwrap();
+    wb.active_mut().unwrap().set_cell("C5", "unrelated");
+    wb.save(&path).unwrap();
+
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        styles_xml.contains("<dxfs count=\"1\""),
+        "source dxf count must be preserved on RMW: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("<dxf>"),
+        "the dxf element must survive RMW: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("patternType=\"solid\""),
+        "preserved dxf fill pattern intact: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("00FFC7CE"),
+        "preserved dxf fill color intact: {styles_xml}"
+    );
+
+    // Reopens cleanly and the dxf is re-readable.
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
