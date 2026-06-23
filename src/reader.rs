@@ -551,40 +551,65 @@ impl Worksheet {
             dest_max_row as u32,
         )?;
 
-        // Phase 1: Collect cells to move AND build the set of ALL destination refs
-        // (whether or not the source was present). This two-phase approach ensures
-        // empty source cells clear their destination (openpyxl parity) and handles
-        // source/dest overlap correctly (sources extracted before clearing).
-        let width = (max_col - min_col + 1) as usize;
-        let height = (max_row - min_row + 1) as usize;
-        let mut moved = Vec::with_capacity(width * height);
-        let mut dest_refs = std::collections::HashSet::with_capacity(width * height);
+        // Phase 1: SPARSE iteration over EXISTING cells, not rectangle area.
+        // For each existing cell, determine if it's inside the source rect or the
+        // dest rect, and collect/mark accordingly. This is O(number of cells), not
+        // O(width × height), so huge declared ranges with few real cells complete
+        // instantly without OOM.
+        //
+        // The two-phase approach preserves all correctness guarantees from Round 2:
+        // - Empty source positions clear their destinations (openpyxl parity).
+        // - Overlap-safe: sources are collected/removed before dest-clear.
+        // - Atomicity: all guards BEFORE any mutation (already done above).
+        let mut moved = Vec::new();
+        let mut stale_dest_refs = std::collections::HashSet::new();
 
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let src_ref = rc_to_a1(row, col);
+        // Single pass over the sparse cell map to classify each cell.
+        for (cell_ref, cell) in &self.cells {
+            let Some((col, row)) = parse_a1(cell_ref) else {
+                continue;
+            };
+
+            // Is this cell inside the source rectangle?
+            let in_source = col >= min_col && col <= max_col && row >= min_row && row <= max_row;
+
+            // Is this cell inside the destination rectangle?
+            let in_dest = i64::from(col) >= dest_min_col
+                && i64::from(col) <= dest_max_col
+                && i64::from(row) >= dest_min_row
+                && i64::from(row) <= dest_max_row;
+
+            if in_source {
+                // Compute destination reference for this source cell.
                 let dest_ref = rc_to_a1(
                     (i64::from(row) + rows) as u32,
                     (i64::from(col) + cols) as u32,
                 );
+                // Collect for relocation (will insert after clearing).
+                let mut moved_cell = cell.clone();
+                moved_cell.reference = dest_ref.clone();
+                moved.push((cell_ref.clone(), dest_ref, moved_cell));
+            }
 
-                // Record every destination ref (clears stale cells even when source empty).
-                dest_refs.insert(dest_ref.clone());
-
-                // Collect present source cells for relocation.
-                if let Some(mut cell) = self.cells.remove(&src_ref) {
-                    cell.reference = dest_ref.clone();
-                    moved.push((dest_ref, cell));
-                }
+            if in_dest {
+                // This cell is stale (will be cleared or overwritten by a source cell).
+                stale_dest_refs.insert(cell_ref.clone());
             }
         }
 
-        // Phase 2: Clear ALL destination refs (handling empty sources), then insert moved cells.
-        for dest_ref in &dest_refs {
-            self.cells.remove(dest_ref);
+        // Phase 2: Remove source cells and stale dest cells, then insert moved cells.
+        for (src_ref, _dest_ref, _moved_cell) in &moved {
+            self.cells.remove(src_ref);
         }
-        for (reference, cell) in moved {
-            self.cells.insert(reference, cell);
+        for stale_ref in &stale_dest_refs {
+            // Only remove stale dest refs that were NOT part of a moved source
+            // (to avoid double-removal if source and dest overlap).
+            if !moved.iter().any(|(src, _, _)| src == stale_ref) {
+                self.cells.remove(stale_ref);
+            }
+        }
+        for (_src_ref, dest_ref, moved_cell) in moved {
+            self.cells.insert(dest_ref, moved_cell);
         }
 
         Ok(())
@@ -2984,5 +3009,58 @@ mod tests {
         let err = ws.move_range("A1", 1_048_576, 0, false).unwrap_err();
         assert!(matches!(err, OxlsxError::InvalidFormat(_)));
         assert_eq!(ws.cell("A1").unwrap().value(), &s("data"));
+    }
+
+    // ---- C4: move_range must be sparse (O(cells) not O(area)) ----
+
+    #[test]
+    fn move_range_huge_range_is_sparse_no_oom() {
+        use std::time::Instant;
+
+        let mut ws = Worksheet::new("S");
+        // Place only a few cells in an enormous declared range.
+        ws.set_cell("A1", "first");
+        ws.set_cell("B2", "second");
+        ws.set_cell("XFD1048576", "last");
+
+        // The declared source range covers the entire Excel grid (~1.7e10 cells),
+        // but only 3 cells actually exist. A dense iteration would OOM/hang;
+        // sparse iteration completes instantly.
+        let start = Instant::now();
+        ws.move_range("A1:XFD1048576", 0, 0, false).unwrap(); // no-op move
+        let elapsed = start.elapsed();
+
+        // If move_range were dense, this would take minutes (or OOM). Sparse
+        // iteration should complete in milliseconds. Set a generous upper bound.
+        assert!(
+            elapsed.as_millis() < 100,
+            "move_range took {:?}, expected <100ms (likely still iterating area not cells)",
+            elapsed
+        );
+
+        // Verify the few real cells remain correct (no-op move preserves refs).
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("first"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("second"));
+        assert_eq!(ws.cell("XFD1048576").unwrap().value(), &s("last"));
+
+        // Now test a real move (offset +1 row) on a large range with few cells.
+        ws.set_cell("A100", "data");
+        let start = Instant::now();
+        ws.move_range("A1:XFD100000", 1, 0, false).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 100,
+            "large-range move_range took {:?}, expected <100ms",
+            elapsed
+        );
+
+        // Verify moved cells.
+        assert!(ws.cell("A1").is_none());
+        assert!(ws.cell("B2").is_none());
+        assert_eq!(ws.cell("A2").unwrap().value(), &s("first"));
+        assert_eq!(ws.cell("B3").unwrap().value(), &s("second"));
+        assert_eq!(ws.cell("A101").unwrap().value(), &s("data"));
+        // XFD1048576 was NOT in the source range (which is A1:XFD100000), so it stays.
+        assert_eq!(ws.cell("XFD1048576").unwrap().value(), &s("last"));
     }
 }
