@@ -1,7 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::useless_conversion)]
 
-use crate::coords::rc_to_a1;
+use crate::coords::{column_index_from_letters, column_letter_from_index, rc_to_a1};
 use crate::{
     Cell, Color, Comment, DefinedName, DefinedNames, Fill, Font, Hyperlink, OxlsxError, StyleSheet,
     Table, TableColumn, TableStyleInfo, Value, Workbook,
@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 #[pymodule]
 fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_workbook, m)?)?;
+    m.add_function(wrap_pyfunction!(get_column_letter, m)?)?;
+    m.add_function(wrap_pyfunction!(column_index_from_string, m)?)?;
     m.add_class::<PyWorkbook>()?;
     m.add_class::<PyWorksheet>()?;
     m.add_class::<PyCell>()?;
@@ -21,6 +23,7 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHyperlink>()?;
     m.add_class::<PyFont>()?;
     m.add_class::<PyFill>()?;
+    m.add_class::<PyPatternFill>()?;
     m.add_class::<PyColor>()?;
     m.add_class::<PyDefinedName>()?;
     m.add_class::<PyDefinedNames>()?;
@@ -38,6 +41,26 @@ fn load_workbook(path: &str) -> PyResult<PyWorkbook> {
         Err(err) => return Err(map_oxlsx_error(err)),
     };
     Ok(PyWorkbook::from_workbook(inner))
+}
+
+/// openpyxl-parity `openpyxl.utils.get_column_letter`: 1-based column index ->
+/// column letters (`1 -> "A"`, `27 -> "AA"`). Raises `ValueError` for `idx < 1`,
+/// mirroring openpyxl.
+#[pyfunction]
+fn get_column_letter(idx: u32) -> PyResult<String> {
+    column_letter_from_index(idx).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("Column index out of bounds: {idx}"))
+    })
+}
+
+/// openpyxl-parity `openpyxl.utils.column_index_from_string`: column letters ->
+/// 1-based column index (`"A" -> 1`, `"AA" -> 27`). Raises `ValueError` for
+/// empty or non-alphabetic input, mirroring openpyxl.
+#[pyfunction]
+fn column_index_from_string(letter: &str) -> PyResult<u32> {
+    column_index_from_letters(letter).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("{letter:?} is not a valid column"))
+    })
 }
 
 #[pyclass(name = "Workbook")]
@@ -536,6 +559,21 @@ impl PyWorksheet {
             .sheet_mut(self.sheet_index)
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
         sheet.set_cell_hyperlink(coord, target);
+        Ok(())
+    }
+
+    /// Apply a [`PyPatternFill`] to `coord`, mirroring openpyxl's
+    /// `cell.fill = PatternFill(...)`. Routed as a worksheet method (like
+    /// `set_cell_comment` / `set_cell_hyperlink`) because `PyCell` is a value
+    /// snapshot and cannot persist a setter back to the workbook. Supporting
+    /// the openpyxl-style `cell.fill = ...` assignment is a separate future
+    /// change that would require making `PyCell` workbook-backed.
+    fn set_cell_fill(&self, coord: &str, fill: &PyPatternFill) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_cell_fill(coord, fill.inner.clone());
         Ok(())
     }
 
@@ -1157,6 +1195,109 @@ impl PyFill {
     }
 }
 
+/// openpyxl-parity `openpyxl.styles.PatternFill`.
+///
+/// Mirrors openpyxl's constructor and alias semantics:
+/// - `fill_type` and `patternType` are the same attribute (`fill_type`
+///   overrides `patternType` when both are given), matching openpyxl.
+/// - `start_color` aliases `fgColor`; `end_color` aliases `bgColor`
+///   (the alias wins when both forms are given), matching openpyxl.
+///
+/// Colors are accepted as hex strings (e.g. `"FFFF0000"`) and stored as
+/// [`Color::Argb`]. The resolved value is held in a Rust [`Fill`], so a
+/// `PatternFill` applied via `ws.set_cell_fill` round-trips through save/open.
+#[pyclass(name = "PatternFill")]
+#[derive(Clone)]
+struct PyPatternFill {
+    inner: Fill,
+}
+
+#[pymethods]
+impl PyPatternFill {
+    #[new]
+    #[pyo3(signature = (
+        fill_type = None,
+        fgColor = None,
+        bgColor = None,
+        start_color = None,
+        end_color = None,
+        patternType = None
+    ))]
+    #[allow(non_snake_case)]
+    fn new(
+        fill_type: Option<String>,
+        fgColor: Option<String>,
+        bgColor: Option<String>,
+        start_color: Option<String>,
+        end_color: Option<String>,
+        patternType: Option<String>,
+    ) -> Self {
+        // Alias resolution mirrors openpyxl: fill_type overrides patternType,
+        // start_color overrides fgColor, end_color overrides bgColor.
+        let pattern = fill_type.or(patternType);
+        let fg = start_color.or(fgColor);
+        let bg = end_color.or(bgColor);
+
+        Self {
+            inner: Fill {
+                pattern_type: pattern.unwrap_or_else(|| "none".to_string()),
+                fg_color: fg.map(Color::Argb),
+                bg_color: bg.map(Color::Argb),
+            },
+        }
+    }
+
+    /// openpyxl's `fill_type` (the canonical name of the pattern attribute).
+    /// `None` when no pattern was set, matching openpyxl's default.
+    #[getter]
+    fn fill_type(&self) -> Option<String> {
+        self.pattern_value()
+    }
+
+    /// openpyxl alias of [`fill_type`](Self::fill_type).
+    #[getter]
+    #[allow(non_snake_case)]
+    fn patternType(&self) -> Option<String> {
+        self.pattern_value()
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn fgColor(&self) -> Option<PyColor> {
+        self.inner.fg_color.clone().map(|inner| PyColor { inner })
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn bgColor(&self) -> Option<PyColor> {
+        self.inner.bg_color.clone().map(|inner| PyColor { inner })
+    }
+
+    /// openpyxl alias of [`fgColor`](Self::fgColor).
+    #[getter]
+    fn start_color(&self) -> Option<PyColor> {
+        self.fgColor()
+    }
+
+    /// openpyxl alias of [`bgColor`](Self::bgColor).
+    #[getter]
+    fn end_color(&self) -> Option<PyColor> {
+        self.bgColor()
+    }
+}
+
+impl PyPatternFill {
+    /// Surfaces the stored pattern type, normalizing the sentinel `"none"`
+    /// back to `None` to match openpyxl's default `fill_type is None`.
+    fn pattern_value(&self) -> Option<String> {
+        if self.inner.pattern_type == "none" {
+            None
+        } else {
+            Some(self.inner.pattern_type.clone())
+        }
+    }
+}
+
 #[pyclass(name = "Color")]
 struct PyColor {
     inner: Color,
@@ -1439,6 +1580,63 @@ mod tests {
         let link = cell.hyperlink().expect("hyperlink should exist");
 
         assert_eq!(link.target(), Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn py_pattern_fill_resolves_aliases_and_round_trips() {
+        use super::{PyPatternFill, get_column_letter};
+
+        // Column-utility parity smoke checks (1-based, openpyxl semantics).
+        assert_eq!(get_column_letter(1).unwrap(), "A");
+        assert_eq!(get_column_letter(27).unwrap(), "AA");
+        assert!(super::column_index_from_string("AA").unwrap() == 27);
+
+        // start_color aliases fgColor; fill_type aliases patternType.
+        let fill = PyPatternFill::new(
+            Some("solid".to_string()),
+            None,
+            None,
+            Some("FFFF0000".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(fill.fill_type(), Some("solid".to_string()));
+        assert_eq!(fill.patternType(), Some("solid".to_string()));
+        let fg = fill
+            .fgColor()
+            .expect("fgColor should resolve from start_color");
+        assert_eq!(fg.rgb(), Some("FFFF0000".to_string()));
+
+        // Apply through the worksheet view and round-trip through save/open.
+        // The cell needs a value to be persisted in the sheet body, so set one
+        // through the GIL-backed `__setitem__` before applying the fill.
+        let path = std::env::temp_dir().join("oxlsx_py_pattern_fill_round_trip.xlsx");
+        let workbook = PyWorkbook::new();
+        let worksheet = workbook
+            .active()
+            .unwrap()
+            .expect("workbook should have active sheet");
+        Python::with_gil(|py| {
+            let value: PyObject = "Filled".into_py(py);
+            worksheet.__setitem__("A1", value.bind(py)).unwrap();
+        });
+        worksheet.set_cell_fill("A1", &fill).unwrap();
+        workbook.save(path.to_str().unwrap()).unwrap();
+
+        let reopened = crate::Workbook::open(&path).unwrap();
+        let cell_fill = reopened
+            .active()
+            .unwrap()
+            .cell("A1")
+            .unwrap()
+            .fill()
+            .unwrap();
+        assert_eq!(cell_fill.pattern_type, "solid");
+        assert_eq!(
+            cell_fill.fg_color,
+            Some(crate::Color::Argb("FFFF0000".to_string()))
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
