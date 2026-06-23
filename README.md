@@ -6,7 +6,7 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 ## Status
 
-**v0.1.0 released** — feature-complete (phases 1–13). First stable API.
+**v0.1.1 released** — feature-complete (phases 1–13) + bulk write, conditional formatting, sheet auto-filter, `PatternFill`, column utils, and `dataframe_to_rows`.
 
 ## Install
 
