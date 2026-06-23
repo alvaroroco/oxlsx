@@ -1,4 +1,5 @@
 use crate::comments::{Comment, parse_comments_xml};
+use crate::conditional_formatting::{ConditionalFormatting, ConditionalRule};
 use crate::coords::{bands_intersect, make_absolute_range, parse_a1, parse_range, rc_to_a1};
 use crate::defined_names::parse_workbook_defined_names;
 use crate::sheet_rels::{
@@ -13,6 +14,7 @@ use crate::{
 };
 use chrono::{Duration, NaiveDate};
 use quick_xml::Reader;
+use quick_xml::Writer;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
 use std::fs::File;
@@ -169,6 +171,11 @@ pub struct Worksheet {
     /// This is the worksheet-scoped filter (openpyxl's `ws.auto_filter.ref`),
     /// distinct from a table's own `<autoFilter>` which lives in `tableN.xml`.
     pub(crate) auto_filter: Option<String>,
+    /// Conditional-formatting blocks in declared (and serialization) order.
+    ///
+    /// Modeled `expression`/`cellIs` rules are fully represented; other rule
+    /// types (`colorScale`, `dataBar`, …) are preserved verbatim as raw XML.
+    pub(crate) conditional_formatting: Vec<ConditionalFormatting>,
 }
 
 impl Worksheet {
@@ -187,6 +194,7 @@ impl Worksheet {
             tables: Vec::new(),
             table_retention: Vec::new(),
             auto_filter: None,
+            conditional_formatting: Vec::new(),
         }
     }
 
@@ -663,6 +671,65 @@ impl Worksheet {
             .map(str::trim)
             .filter(|range| !range.is_empty())
             .map(ToString::to_string);
+    }
+
+    /// Conditional-formatting blocks defined on this worksheet, in declared
+    /// order. Mirrors openpyxl's `ws.conditional_formatting` (iterated as
+    /// `(range, rules)` pairs).
+    pub fn conditional_formatting(&self) -> &[ConditionalFormatting] {
+        &self.conditional_formatting
+    }
+
+    /// Register a conditional-formatting `rule` against `sqref`, mirroring
+    /// openpyxl's `ws.conditional_formatting.add(sqref, rule)`.
+    ///
+    /// The rule receives an auto-assigned global `priority` (`max(existing) +
+    /// 1`). Rules sharing a `sqref` are grouped into one block, preserving add
+    /// order. Returns [`OxlsxError::InvalidFormat`] (leaving the worksheet
+    /// unchanged) when `sqref` is empty or any space-separated token is not a
+    /// valid A1 range.
+    pub fn add_conditional_formatting(
+        &mut self,
+        sqref: &str,
+        mut rule: ConditionalRule,
+    ) -> Result<(), OxlsxError> {
+        let trimmed = sqref.trim();
+        let valid = !trimmed.is_empty()
+            && trimmed
+                .split_whitespace()
+                .all(|token| parse_range(token).is_some());
+        if !valid {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "conditional formatting sqref {sqref:?} is not a valid A1 range"
+            )));
+        }
+
+        rule.priority = Some(self.max_cf_priority() + 1);
+
+        if let Some(block) = self
+            .conditional_formatting
+            .iter_mut()
+            .find(|block| block.sqref == trimmed)
+        {
+            block.rules.push(rule);
+        } else {
+            self.conditional_formatting.push(ConditionalFormatting {
+                sqref: trimmed.to_string(),
+                rules: vec![rule],
+            });
+        }
+        Ok(())
+    }
+
+    /// The highest priority currently assigned across every rule on this sheet,
+    /// or `0` when there are none. Backs sequential priority assignment.
+    fn max_cf_priority(&self) -> u32 {
+        self.conditional_formatting
+            .iter()
+            .flat_map(|block| block.rules.iter())
+            .filter_map(|rule| rule.priority)
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn print_area(&self) -> Option<String> {
@@ -1234,6 +1301,7 @@ fn parse_sheet<R: BufRead>(
     let mut in_sheet_view = false;
     let mut raw_hyperlinks = Vec::new();
     let mut auto_filter = None;
+    let mut conditional_formatting: Vec<ConditionalFormatting> = Vec::new();
 
     loop {
         match xml.read_event_into(&mut buf)? {
@@ -1250,6 +1318,17 @@ fn parse_sheet<R: BufRead>(
                 if let Some(range_ref) = attr_value(&e, b"ref")? {
                     merged_cells.push(range_ref);
                 }
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"conditionalFormatting" => {
+                // `<conditionalFormatting sqref="...">` always has `<cfRule>`
+                // children, so it arrives as a Start. Drain the whole block
+                // (modeled rules + verbatim unmodeled children) in a helper.
+                let sqref = attr_value(&e, b"sqref")?.unwrap_or_default();
+                conditional_formatting.push(parse_conditional_formatting(
+                    &mut xml,
+                    styles.as_ref(),
+                    sqref,
+                )?);
             }
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"autoFilter" => {
                 // Sheet-level `<autoFilter ref="...">`. A table's own autoFilter
@@ -1364,9 +1443,130 @@ fn parse_sheet<R: BufRead>(
             tables: Vec::new(),
             table_retention: Vec::new(),
             auto_filter,
+            conditional_formatting,
         },
         raw_hyperlinks,
     ))
+}
+
+/// Drain one `<conditionalFormatting>` block, modeling `expression`/`cellIs`
+/// rules and preserving every other rule type verbatim.
+///
+/// `xml` is positioned just after the `<conditionalFormatting>` start tag;
+/// reading stops at the matching end tag. Modeled fields (`type`, `priority`,
+/// `operator`, `dxfId`, `stopIfTrue`) are extracted; `<formula>` text is
+/// collected unescaped; any other attribute or child subtree (e.g. a
+/// `<colorScale>`) is captured raw so it round-trips unchanged. A parsed
+/// `dxfId` is resolved against the source `styles` registry.
+fn parse_conditional_formatting<R: BufRead>(
+    xml: &mut Reader<R>,
+    styles: &StyleSheet,
+    sqref: String,
+) -> Result<ConditionalFormatting, OxlsxError> {
+    let mut buf = Vec::new();
+    let mut rules: Vec<ConditionalRule> = Vec::new();
+    let mut cur: Option<ConditionalRule> = None;
+    let mut unmodeled: Writer<Vec<u8>> = Writer::new(Vec::new());
+    // `capture_depth > 0` while inside an unmodeled child subtree: every event
+    // is re-serialized into `unmodeled` until the subtree closes.
+    let mut capture_depth = 0usize;
+    let mut in_formula = false;
+    let mut cur_formula = String::new();
+
+    loop {
+        match xml.read_event_into(&mut buf)? {
+            Event::Start(e) => {
+                if capture_depth > 0 {
+                    unmodeled.write_event(Event::Start(e))?;
+                    capture_depth += 1;
+                } else {
+                    match e.local_name().as_ref() {
+                        b"cfRule" => cur = Some(parse_cf_rule_attrs(&e, styles)?),
+                        b"formula" if cur.is_some() => {
+                            in_formula = true;
+                            cur_formula.clear();
+                        }
+                        _ if cur.is_some() => {
+                            unmodeled.write_event(Event::Start(e))?;
+                            capture_depth = 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Event::Empty(e) => {
+                if capture_depth > 0 || cur.is_some() {
+                    unmodeled.write_event(Event::Empty(e))?;
+                }
+            }
+            Event::Text(t) => {
+                if capture_depth > 0 {
+                    unmodeled.write_event(Event::Text(t))?;
+                } else if in_formula {
+                    cur_formula.push_str(&t.unescape()?);
+                }
+            }
+            Event::End(e) => {
+                if capture_depth > 0 {
+                    unmodeled.write_event(Event::End(e))?;
+                    capture_depth -= 1;
+                } else {
+                    match e.local_name().as_ref() {
+                        b"formula" if in_formula => {
+                            in_formula = false;
+                            if let Some(rule) = cur.as_mut() {
+                                rule.formulas.push(std::mem::take(&mut cur_formula));
+                            }
+                        }
+                        b"cfRule" => {
+                            if let Some(mut rule) = cur.take() {
+                                let captured =
+                                    std::mem::replace(&mut unmodeled, Writer::new(Vec::new()))
+                                        .into_inner();
+                                rule.unmodeled_children =
+                                    String::from_utf8(captured).unwrap_or_default();
+                                rules.push(rule);
+                            }
+                        }
+                        b"conditionalFormatting" => break,
+                        _ => {}
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(ConditionalFormatting { sqref, rules })
+}
+
+/// Parse a `<cfRule>` start tag into a [`ConditionalRule`], splitting modeled
+/// attributes from unmodeled ones and resolving the `dxfId` against `styles`.
+fn parse_cf_rule_attrs(
+    e: &BytesStart<'_>,
+    styles: &StyleSheet,
+) -> Result<ConditionalRule, OxlsxError> {
+    let mut rule = ConditionalRule::empty();
+    for attr in e.attributes().with_checks(false) {
+        let attr = attr.map_err(|err| OxlsxError::Xml(err.into()))?;
+        let value = attr.unescape_value()?.into_owned();
+        match attr.key.as_ref() {
+            b"type" => rule.type_ext = value,
+            b"priority" => rule.priority = value.parse().ok(),
+            b"operator" => rule.operator = Some(value),
+            b"dxfId" => rule.dxf_id = value.parse().ok(),
+            b"stopIfTrue" => rule.stop_if_true = value == "1" || value == "true",
+            other => rule
+                .unmodeled_attrs
+                .push((String::from_utf8_lossy(other).into_owned(), value)),
+        }
+    }
+    if let Some(id) = rule.dxf_id {
+        rule.dxf = styles.dxfs.get(id as usize).cloned();
+    }
+    Ok(rule)
 }
 
 fn is_frozen_pane(pane: &BytesStart<'_>) -> Result<bool, OxlsxError> {
@@ -2034,6 +2234,7 @@ mod tests {
                     tables: Vec::new(),
                     table_retention: Vec::new(),
                     auto_filter: None,
+                    conditional_formatting: Vec::new(),
                 },
                 Worksheet {
                     name: "Productos".to_string(),
@@ -2049,6 +2250,7 @@ mod tests {
                     tables: Vec::new(),
                     table_retention: Vec::new(),
                     auto_filter: None,
+                    conditional_formatting: Vec::new(),
                 },
             ],
             active_index: 1,
