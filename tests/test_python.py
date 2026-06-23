@@ -1563,3 +1563,49 @@ def test_dataframe_to_rows_multiindex_not_supported():
     with pytest.raises(NotImplementedError):
         list(oxlsx.dataframe_to_rows(mi, index=True, header=True))
 
+
+# ---- C4/W2: append dict must reject huge column keys (no OOM) ----
+
+
+def test_append_dict_rejects_huge_column_key_letters():
+    """Append dict with a column-letter key past XFD (16_384) → ValueError."""
+    wb = oxlsx.Workbook()
+    ws = wb.active
+
+    # Column "ZZZZZZ" far exceeds XFD (16_384) → reject, no OOM.
+    with pytest.raises(ValueError, match="out of bounds|exceeds maximum"):
+        ws.append({"ZZZZZZ": 1})
+
+    # Worksheet unchanged (no partial row added).
+    assert ws["A1"].value is None
+
+
+def test_append_dict_rejects_huge_column_key_integer():
+    """Append dict with integer key > 16_384 OR >= 2^32 → ValueError, no panic."""
+    wb = oxlsx.Workbook()
+    ws = wb.active
+
+    # Integer key 4_294_967_295 (u32::MAX) → reject.
+    with pytest.raises(ValueError, match="out of bounds|exceeds maximum"):
+        ws.append({4_294_967_295: 1})
+
+    assert ws["A1"].value is None
+
+    # Key 16_385 (one past XFD) → reject.
+    with pytest.raises(ValueError, match="out of bounds|exceeds maximum"):
+        ws.append({16_385: "nope"})
+
+    assert ws["A1"].value is None
+
+    # CRITICAL: key 2^32 (would truncate to 0 before fix) → reject, NO PANIC.
+    with pytest.raises(ValueError, match="out of bounds|exceeds maximum"):
+        ws.append({2**32: 1})
+
+    assert ws["A1"].value is None
+
+    # CRITICAL: key 2^32 + 5 (would truncate to 5, silent corruption) → reject.
+    with pytest.raises(ValueError, match="out of bounds|exceeds maximum"):
+        ws.append({2**32 + 5: "x"})
+
+    assert ws["A1"].value is None
+
