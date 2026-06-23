@@ -18,6 +18,7 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(column_index_from_string, m)?)?;
     m.add_class::<PyWorkbook>()?;
     m.add_class::<PyWorksheet>()?;
+    m.add_class::<PyAutoFilter>()?;
     m.add_class::<PyCell>()?;
     m.add_class::<PyComment>()?;
     m.add_class::<PyHyperlink>()?;
@@ -681,6 +682,17 @@ impl PyWorksheet {
         }
     }
 
+    /// Sheet-level autofilter, mirroring openpyxl's `ws.auto_filter`. The
+    /// returned object exposes a `.ref` get/set that persists to the worksheet
+    /// (`ws.auto_filter.ref = "A1:D10"`).
+    #[getter]
+    fn auto_filter(&self) -> PyAutoFilter {
+        PyAutoFilter {
+            workbook: Arc::clone(&self.workbook),
+            sheet_index: self.sheet_index,
+        }
+    }
+
     /// Add an Excel table, mirroring openpyxl's `ws.add_table`.
     ///
     /// Raises `ValueError` if a table with the same `displayName` (case-insensitive)
@@ -796,6 +808,48 @@ impl PyWorksheet {
         sheet
             .move_range(cell_range, rows, cols, translate)
             .map_err(map_oxlsx_error)
+    }
+}
+
+/// Sheet-level autofilter, mirroring openpyxl's `AutoFilter`. Backed live by
+/// the owning workbook; assigning `.ref` persists to the worksheet.
+#[pyclass(name = "AutoFilter")]
+struct PyAutoFilter {
+    workbook: Arc<Mutex<Workbook>>,
+    sheet_index: usize,
+}
+
+impl PyAutoFilter {
+    fn lock(&self) -> PyResult<MutexGuard<'_, Workbook>> {
+        self.workbook
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Workbook lock poisoned"))
+    }
+}
+
+#[pymethods]
+impl PyAutoFilter {
+    /// The filter range (e.g. `"A1:D10"`), or `None` when unset. Mirrors
+    /// openpyxl's `ws.auto_filter.ref`.
+    #[getter]
+    fn r#ref(&self) -> PyResult<Option<String>> {
+        let workbook = self.lock()?;
+        let sheet = workbook
+            .sheet(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        Ok(sheet.auto_filter().map(str::to_owned))
+    }
+
+    /// Set or clear the filter range, persisting to the worksheet. `None`
+    /// clears it, mirroring openpyxl's `ws.auto_filter.ref = None`.
+    #[setter]
+    fn set_ref(&self, value: Option<String>) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.set_auto_filter(value.as_deref());
+        Ok(())
     }
 }
 

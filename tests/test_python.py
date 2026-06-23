@@ -467,6 +467,32 @@ def test_print_area_write_new_workbook(new_wb, load_wb):
         os.unlink(path)
 
 
+def test_auto_filter_round_trip(new_wb, load_wb):
+    wb, save = new_wb
+    ws = wb.active
+    ws.auto_filter.ref = "A1:C5"
+    assert ws.auto_filter.ref == "A1:C5"
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        save(path)
+        # Reopen with openpyxl specifically: a structural error would surface
+        # as a repair / parse failure here.
+        wb2 = openpyxl.load_workbook(path)
+        assert wb2.active.auto_filter.ref == "A1:C5"
+
+        # And reopen through the same backend for parity.
+        wb3 = load_wb(path)
+        assert wb3.active.auto_filter.ref == "A1:C5"
+
+        with zipfile.ZipFile(path, "r") as zf:
+            sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert '<autoFilter ref="A1:C5"' in sheet_xml
+    finally:
+        os.unlink(path)
+
+
 def test_print_area_clear_removes_defined_name(load_wb):
     seeded_path = _make_seed_with_defined_names(
         '<definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">\'Sheet\'!$A$1:$A$5</definedName><definedName name="KeepMe">Sheet!$D$1</definedName></definedNames>'
