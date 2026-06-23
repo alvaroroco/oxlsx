@@ -100,7 +100,7 @@ Mirror openpyxl's most-used read patterns:
 4. `ws.max_row`, `ws.max_column`, `ws.min_row`, `ws.min_column` properties
 5. Python bindings for all of the above
 
-### 🔲 Phase 10 — Bulk Write API (in progress — Rust core done; Python bindings pending)
+### ✅ Phase 10 — Bulk Write API
 Common patterns for programmatic report generation:
 1. `ws.append(iterable)` — append a row of values at the bottom (list, tuple, dict)
 2. `ws.delete_rows(idx, amount)` / `ws.delete_cols(idx, amount)`
