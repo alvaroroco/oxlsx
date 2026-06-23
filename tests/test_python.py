@@ -1481,3 +1481,85 @@ def test_conditional_formatting_with_pattern_fill():
         if os.path.exists(path):
             os.remove(path)
 
+
+# ---------------------------------------------------------------------------
+# openpyxl-parity: dataframe_to_rows (openpyxl.utils.dataframe.dataframe_to_rows)
+#
+# Migration helper so users can do:
+#     for row in oxlsx.dataframe_to_rows(df, index=True, header=True):
+#         ws.append(row)
+#
+# pandas is an OPTIONAL, user-provided integration — oxlsx duck-types the
+# DataFrame and does NOT depend on pandas. These tests are skip-safe in a CI
+# venv without pandas via pytest.importorskip.
+# ---------------------------------------------------------------------------
+
+
+def test_dataframe_to_rows_matches_openpyxl():
+    pd = pytest.importorskip("pandas")
+    from openpyxl.utils.dataframe import dataframe_to_rows as openpyxl_d2r
+
+    # Mixed per-column dtypes (int / float / str) guard against any value
+    # round-tripping that would upcast a column (e.g. via df.values).
+    df = pd.DataFrame({"a": [1, 2], "b": [3.5, 4.5], "c": ["x", "y"]})
+
+    for index in (True, False):
+        for header in (True, False):
+            expected = [list(r) for r in openpyxl_d2r(df, index=index, header=header)]
+            actual = [
+                list(r) for r in oxlsx.dataframe_to_rows(df, index=index, header=header)
+            ]
+            assert actual == expected, f"index={index} header={header}"
+
+
+def test_dataframe_to_rows_default_args_match_openpyxl():
+    pd = pytest.importorskip("pandas")
+    from openpyxl.utils.dataframe import dataframe_to_rows as openpyxl_d2r
+
+    df = pd.DataFrame({"name": ["Ann", "Bob"], "age": [30, 25]})
+
+    # Defaults are index=True, header=True (openpyxl parity).
+    expected = [list(r) for r in openpyxl_d2r(df)]
+    actual = [list(r) for r in oxlsx.dataframe_to_rows(df)]
+    assert actual == expected
+    # Anchor the concrete expected layout: leading None header cell + the
+    # always-yielded index-names row when index=True.
+    assert actual == [
+        [None, "name", "age"],
+        [None],
+        [0, "Ann", 30],
+        [1, "Bob", 25],
+    ]
+
+
+def test_dataframe_to_rows_then_append():
+    pd = pytest.importorskip("pandas")
+    df = pd.DataFrame({"name": ["Ann", "Bob"], "age": [30, 25]})
+
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    for row in oxlsx.dataframe_to_rows(df, index=False, header=True):
+        ws.append(row)
+
+    path = _temp_xlsx("oxlsx_py_dataframe_to_rows_append.xlsx")
+    try:
+        wb.save(path)
+        ws2 = oxlsx.load_workbook(path).active
+        grid = _window(ws2, 3, 2)
+        assert grid == [("name", "age"), ("Ann", 30), ("Bob", 25)]
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_dataframe_to_rows_multiindex_not_supported():
+    pd = pytest.importorskip("pandas")
+
+    mi = pd.DataFrame(
+        [[1, 2]], columns=pd.MultiIndex.from_tuples([("A", "x"), ("A", "y")])
+    )
+    # MultiIndex columns/index are out of scope; oxlsx raises rather than
+    # emitting a silently-wrong (single-level) layout.
+    with pytest.raises(NotImplementedError):
+        list(oxlsx.dataframe_to_rows(mi, index=True, header=True))
+

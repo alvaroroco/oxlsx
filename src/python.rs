@@ -16,6 +16,7 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_workbook, m)?)?;
     m.add_function(wrap_pyfunction!(get_column_letter, m)?)?;
     m.add_function(wrap_pyfunction!(column_index_from_string, m)?)?;
+    m.add_function(wrap_pyfunction!(dataframe_to_rows, m)?)?;
     m.add_class::<PyWorkbook>()?;
     m.add_class::<PyWorksheet>()?;
     m.add_class::<PyAutoFilter>()?;
@@ -65,6 +66,91 @@ fn column_index_from_string(letter: &str) -> PyResult<u32> {
     column_index_from_letters(letter).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!("{letter:?} is not a valid column"))
     })
+}
+
+/// openpyxl-parity `openpyxl.utils.dataframe.dataframe_to_rows`.
+///
+/// Duck-types a pandas `DataFrame` through the Python object protocol — oxlsx
+/// has NO build dependency on pandas/numpy. Yields the same rows openpyxl
+/// produces, so callers can do:
+///
+/// ```python
+/// for row in oxlsx.dataframe_to_rows(df, index=True, header=True):
+///     ws.append(row)
+/// ```
+///
+/// Replicates openpyxl's single-level algorithm exactly:
+/// - `header=True` emits the column-label row, prefixed by one `None` per index
+///   level when `index=True`.
+/// - `index=True` additionally yields the `df.index.names` row right after the
+///   header — openpyxl emits it even when `header=False`, so oxlsx does too.
+/// - each data row is `[index_value] + cell_values` when `index=True`, otherwise
+///   the bare cell values. Values are passed through verbatim (native pandas
+///   `itertuples` scalars), so per-column dtypes are never upcast.
+///
+/// MultiIndex columns/index (`nlevels > 1`) are out of scope and raise
+/// `NotImplementedError` rather than emitting a silently-wrong single-level
+/// layout.
+#[pyfunction]
+#[pyo3(signature = (df, index=true, header=true))]
+fn dataframe_to_rows(
+    py: Python<'_>,
+    df: &Bound<'_, PyAny>,
+    index: bool,
+    header: bool,
+) -> PyResult<Vec<Vec<PyObject>>> {
+    let columns = df.getattr("columns")?;
+    let df_index = df.getattr("index")?;
+
+    let column_levels: usize = columns.getattr("nlevels")?.extract()?;
+    let index_levels: usize = df_index.getattr("nlevels")?.extract()?;
+    if column_levels > 1 || index_levels > 1 {
+        return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "dataframe_to_rows: MultiIndex columns/index are not supported",
+        ));
+    }
+
+    let mut rows: Vec<Vec<PyObject>> = Vec::new();
+
+    if header {
+        let mut header_row: Vec<PyObject> = Vec::new();
+        if index {
+            for _ in 0..index_levels {
+                header_row.push(py.None());
+            }
+        }
+        for label in columns.iter()? {
+            header_row.push(label?.unbind());
+        }
+        rows.push(header_row);
+    }
+
+    if index {
+        let mut names_row: Vec<PyObject> = Vec::new();
+        for name in df_index.getattr("names")?.iter()? {
+            names_row.push(name?.unbind());
+        }
+        rows.push(names_row);
+    }
+
+    // Mirror openpyxl: zip the single-level index values with the index-less
+    // `itertuples` so `None`-bearing native scalars survive untouched.
+    let index_iter = df_index.iter()?;
+    let tuples = df.call_method1("itertuples", (false,))?;
+    let tuple_iter = tuples.iter()?;
+
+    for (index_value, tuple) in index_iter.zip(tuple_iter) {
+        let mut row: Vec<PyObject> = Vec::new();
+        if index {
+            row.push(index_value?.unbind());
+        }
+        for value in tuple?.iter()? {
+            row.push(value?.unbind());
+        }
+        rows.push(row);
+    }
+
+    Ok(rows)
 }
 
 #[pyclass(name = "Workbook")]
