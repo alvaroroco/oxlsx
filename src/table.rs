@@ -20,7 +20,7 @@
 //! have no retained bytes and always use the model path.
 
 use crate::OxlsxError;
-use crate::coords::{column_index, rc_to_a1};
+use crate::coords::{parse_range, rc_to_a1};
 use crate::reader::{Value, Worksheet};
 use crate::xml::attr_value;
 use quick_xml::Reader;
@@ -331,31 +331,6 @@ fn value_to_header(value: &Value) -> String {
         }
         Value::Date(date) => date.to_string(),
         Value::Empty => String::new(),
-    }
-}
-
-/// Parse a cell reference like `"B2"` into `(column, row)`, both 1-based.
-fn parse_cell_ref(reference: &str) -> Option<(u32, u32)> {
-    let col = column_index(reference)?;
-    let row: u32 = reference
-        .chars()
-        .skip_while(|c| c.is_ascii_alphabetic())
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .ok()?;
-    if row == 0 { None } else { Some((col, row)) }
-}
-
-/// Parse an A1 range like `"A1:C3"` into `((start_col, start_row), (end_col,
-/// end_row))`. A bare cell (`"A1"`) is treated as a single-cell range.
-fn parse_range(ref_range: &str) -> Option<((u32, u32), (u32, u32))> {
-    match ref_range.split_once(':') {
-        Some((start, end)) => Some((parse_cell_ref(start.trim())?, parse_cell_ref(end.trim())?)),
-        None => {
-            let cell = parse_cell_ref(ref_range.trim())?;
-            Some((cell, cell))
-        }
     }
 }
 
