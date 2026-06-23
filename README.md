@@ -48,7 +48,7 @@ maturin develop --release   # install into the active venv
 | 7 | Read-modify-write (open + edit + save) | ✅ Done |
 | 8 | Extended write features | ✅ Done |
 | 9 | Worksheet iteration API | ✅ Done |
-| 10 | Bulk write API | ✅ Done |
+| 10 | Bulk write API (`append`, insert/delete rows/cols, `move_range`) | ✅ Done |
 | 11 | Rich formatting | ✅ Done |
 | 12 | Hyperlinks + plain-text comments | ✅ Done |
 | 13 | Freeze panes, print settings, named ranges, tables (lossless RMW) | ✅ Done |
@@ -221,7 +221,7 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 - [x] Streaming reader (`open_readonly()`), PyO3 bindings, read-modify-write
 - [x] Extended write: formulas, merged cells, column widths, date numFmt
 - [x] Iteration API (`iter_rows`/`iter_cols`/`rows`/`columns`/`values`, bounds)
-- [x] Bulk write (`append`, insert/delete rows/cols, `move_range`)
+- [x] Bulk write (`append`, insert/delete rows/cols, `move_range`) — Rust + Python; merges/dims shift, table-intersection guard, formulas verbatim
 - [x] Rich formatting (`number_format`, `alignment`, `border`, `protection`)
 - [x] Hyperlinks + plain-text comments
 - [x] Freeze panes; print area / print titles

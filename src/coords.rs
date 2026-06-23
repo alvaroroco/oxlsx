@@ -144,6 +144,53 @@ pub(crate) fn make_absolute_line_range(range: &str) -> String {
     }
 }
 
+/// Parse a single A1 cell reference like `"B3"` into `(column, row)`, both
+/// 1-based and **column-first**.
+///
+/// Returns `None` unless the reference is a clean `<letters><digits>` cell
+/// (e.g. `"A"`, `"3"`, `"$A$1"`, and ranges like `"A1:C5"` are rejected). This
+/// is the canonical single-cell parser reused by the reader's coordinate scans
+/// and the bulk-write shift engine.
+pub(crate) fn parse_a1(reference: &str) -> Option<(u32, u32)> {
+    let col = column_index(reference)?;
+    let row_start = reference
+        .bytes()
+        .position(|b| !b.is_ascii_alphabetic())
+        .unwrap_or(reference.len());
+    if row_start == reference.len() {
+        return None;
+    }
+
+    let row = reference.get(row_start..)?.parse::<u32>().ok()?;
+    if row == 0 { None } else { Some((col, row)) }
+}
+
+/// Parse an A1 range like `"A1:C5"` into `((start_col, start_row), (end_col,
+/// end_row))`, all 1-based and **column-first**.
+///
+/// A bare cell (`"A1"`) is treated as a single-cell range. Endpoints are
+/// trimmed. Returns `None` if either endpoint is not a clean A1 cell. This is
+/// the single canonical range parser reused by tables and the bulk-write shift
+/// engine (no per-module duplicates).
+pub(crate) fn parse_range(range: &str) -> Option<((u32, u32), (u32, u32))> {
+    match range.split_once(':') {
+        Some((start, end)) => Some((parse_a1(start.trim())?, parse_a1(end.trim())?)),
+        None => {
+            let cell = parse_a1(range.trim())?;
+            Some((cell, cell))
+        }
+    }
+}
+
+/// Inclusive 1-D band intersection on 1-based indices.
+///
+/// Returns `true` when `[a_start, a_end]` overlaps `[b_start, b_end]`. Touching
+/// at a single index counts as an intersection. Used by the bulk-write
+/// table-intersection guard, where the affected band is `[idx, u32::MAX]`.
+pub(crate) fn bands_intersect(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> bool {
+    a_start <= b_end && b_start <= a_end
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -195,6 +242,39 @@ mod tests {
         assert_eq!(super::column_letter_from_index(703).as_deref(), Some("AAA"));
         // openpyxl raises ValueError for indices < 1.
         assert_eq!(super::column_letter_from_index(0), None);
+    }
+
+    #[test]
+    fn parse_a1_and_range_are_column_first() {
+        assert_eq!(super::parse_a1("A1"), Some((1, 1)));
+        assert_eq!(super::parse_a1("B3"), Some((2, 3)));
+        assert_eq!(super::parse_a1("AA10"), Some((27, 10)));
+        // Not a clean single cell.
+        assert_eq!(super::parse_a1("A"), None);
+        assert_eq!(super::parse_a1("3"), None);
+        assert_eq!(super::parse_a1("A1:C5"), None);
+
+        assert_eq!(super::parse_range("A1:C5"), Some(((1, 1), (3, 5))));
+        // A bare cell is a single-cell range.
+        assert_eq!(super::parse_range("B2"), Some(((2, 2), (2, 2))));
+        // Endpoints are trimmed.
+        assert_eq!(super::parse_range(" A1 : C5 "), Some(((1, 1), (3, 5))));
+        assert_eq!(super::parse_range("not-a-range"), None);
+    }
+
+    #[test]
+    fn bands_intersect_detects_inclusive_overlap() {
+        // Touching at a single index counts as intersection (inclusive).
+        assert!(super::bands_intersect(1, 3, 3, 5));
+        assert!(super::bands_intersect(3, 5, 1, 3));
+        // Fully nested.
+        assert!(super::bands_intersect(2, 4, 1, 10));
+        // Disjoint.
+        assert!(!super::bands_intersect(1, 2, 3, 4));
+        assert!(!super::bands_intersect(5, 6, 1, 4));
+        // Open-ended affected band [idx, MAX] vs a range.
+        assert!(super::bands_intersect(2, u32::MAX, 1, 3));
+        assert!(!super::bands_intersect(5, u32::MAX, 1, 3));
     }
 
     #[test]

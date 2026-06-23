@@ -1234,3 +1234,136 @@ def test_pattern_fill_round_trip():
     finally:
         os.unlink(path)
 
+
+# ---------------------------------------------------------------------------
+# Phase 10 (real) — bulk-write parity: append (list/dict), insert/delete rows,
+# move_range. Each test runs the SAME op sequence against openpyxl and oxlsx
+# and asserts the resulting grids match (cross-engine parity), plus an explicit
+# expected layout so the assertions exercise real production logic.
+# ---------------------------------------------------------------------------
+
+
+def _window(ws, max_row, max_col):
+    """Normalized value grid over a fixed window (engine-agnostic)."""
+    return [
+        tuple(row)
+        for row in ws.iter_rows(
+            min_row=1, max_row=max_row, min_col=1, max_col=max_col, values_only=True
+        )
+    ]
+
+
+def _do_appends(ws):
+    # Positional list from column A.
+    ws.append(["a", "b", "c"])
+    # Dict with column-LETTER keys (B is skipped -> stays empty).
+    ws.append({"A": "x", "C": "z"})
+    # Dict with 1-based INT keys.
+    ws.append({1: "p", 3: "r"})
+    # Dict with MIXED letter + int keys (A and C are gaps).
+    ws.append({"B": "q", 4: "s"})
+
+
+def test_append_list_and_dict():
+    expected = [
+        ("a", "b", "c", None),
+        ("x", None, "z", None),
+        ("p", None, "r", None),
+        (None, "q", None, "s"),
+    ]
+
+    wb_o = openpyxl.Workbook()
+    _do_appends(wb_o.active)
+    grid_o = _window(wb_o.active, 4, 4)
+
+    wb_x = oxlsx.Workbook()
+    _do_appends(wb_x.active)
+    grid_x = _window(wb_x.active, 4, 4)
+
+    # oxlsx matches the concrete openpyxl-dict semantics...
+    assert grid_x == expected
+    # ...and matches openpyxl exactly (cross-engine parity).
+    assert grid_x == grid_o
+
+
+def _seed_and_edit_rows(ws):
+    ws["A1"] = "r1"
+    ws["A2"] = "r2"
+    ws["A3"] = "r3"
+    ws["B1"] = 1
+    ws["B2"] = 2
+    ws["B3"] = 3
+    ws.insert_rows(2)  # blank row before row 2; r2/r3 shift down
+    ws.delete_rows(1)  # drop original r1; everything shifts up
+
+
+def test_delete_and_insert_rows():
+    expected = [
+        (None, None),
+        ("r2", 2),
+        ("r3", 3),
+        (None, None),
+        (None, None),
+        (None, None),
+    ]
+
+    # openpyxl reference layout after the same op sequence.
+    wb_o = openpyxl.Workbook()
+    _seed_and_edit_rows(wb_o.active)
+    grid_o = _window(wb_o.active, 6, 2)
+
+    # oxlsx in-memory layout after the same op sequence.
+    wb_x = oxlsx.Workbook()
+    _seed_and_edit_rows(wb_x.active)
+    grid_x_mem = _window(wb_x.active, 6, 2)
+
+    # oxlsx layout after a save + reopen round-trip (persistence parity).
+    path = _temp_xlsx("oxlsx_py_bulk_insert_delete.xlsx")
+    try:
+        wb_x.save(path)
+        grid_x_disk = _window(oxlsx.load_workbook(path).active, 6, 2)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+    assert grid_x_mem == expected
+    assert grid_x_mem == grid_o
+    assert grid_x_disk == expected
+
+
+def _seed_and_move(ws):
+    ws["A1"] = 1
+    ws["B1"] = 2
+    ws["A2"] = 3
+    ws["B2"] = 4
+    # Relocate the 2x2 block down 2 / right 2 -> C3:D4; source clears.
+    ws.move_range("A1:B2", rows=2, cols=2)
+
+
+def test_move_range():
+    expected = [
+        (None, None, None, None),
+        (None, None, None, None),
+        (None, None, 1, 2),
+        (None, None, 3, 4),
+    ]
+
+    wb_o = openpyxl.Workbook()
+    _seed_and_move(wb_o.active)
+    grid_o = _window(wb_o.active, 4, 4)
+
+    wb_x = oxlsx.Workbook()
+    _seed_and_move(wb_x.active)
+    grid_x = _window(wb_x.active, 4, 4)
+
+    assert grid_x == expected
+    assert grid_x == grid_o
+
+    # openpyxl SUPPORTS translate=True, but oxlsx does NOT model formula
+    # translation, so it honestly raises NotImplementedError on that path.
+    wb_t = oxlsx.Workbook()
+    ws_t = wb_t.active
+    ws_t["A1"] = "=B1"
+    with pytest.raises(NotImplementedError):
+        ws_t.move_range("A1", rows=1, cols=0, translate=True)
+

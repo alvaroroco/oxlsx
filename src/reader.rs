@@ -1,5 +1,5 @@
 use crate::comments::{Comment, parse_comments_xml};
-use crate::coords::{column_index, make_absolute_range, rc_to_a1};
+use crate::coords::{bands_intersect, make_absolute_range, parse_a1, parse_range, rc_to_a1};
 use crate::defined_names::parse_workbook_defined_names;
 use crate::sheet_rels::{
     COMMENTS_REL_TYPE, SheetRelEntry, TABLE_REL_TYPE, parse_sheet_rels, relation_target_for_id,
@@ -363,6 +363,277 @@ impl Worksheet {
         self.row_heights.insert(row, height);
     }
 
+    /// Insert `amount` blank rows before 1-based row `idx`, shifting existing
+    /// rows (cells, merged ranges, row heights) down. Mirrors openpyxl's
+    /// `ws.insert_rows(idx, amount)`.
+    ///
+    /// Returns [`OxlsxError::TableIntersection`] (leaving the worksheet
+    /// unchanged) when the affected band overlaps any table's range: shifting
+    /// table refs is deferred, so the operation is rejected rather than
+    /// silently corrupting the table.
+    ///
+    /// Note: merged cells and row/column dimensions are shifted here — a
+    /// deliberate, documented superset of openpyxl 3.1.2, which leaves them in
+    /// place (and thus visually misaligned) after a bulk op.
+    pub fn insert_rows(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        self.guard_tables(Axis::Row, idx)?;
+        if amount > 0 {
+            self.shift_axis(Axis::Row, idx, i64::from(amount));
+        }
+        Ok(())
+    }
+
+    /// Delete `amount` rows starting at 1-based row `idx`, dropping cells in the
+    /// removed band and shifting later rows up. Mirrors openpyxl's
+    /// `ws.delete_rows(idx, amount)`.
+    ///
+    /// Partial-straddle merged ranges (those crossing the deleted band) are
+    /// dropped; fully-after ranges shift up; fully-before ranges are unchanged.
+    /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
+    /// band overlaps a table range.
+    pub fn delete_rows(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        self.guard_tables(Axis::Row, idx)?;
+        if amount > 0 {
+            self.shift_axis(Axis::Row, idx, -i64::from(amount));
+        }
+        Ok(())
+    }
+
+    /// Insert `amount` blank columns before 1-based column `idx`, shifting
+    /// existing columns (cells, merged ranges, column widths) right. Mirrors
+    /// openpyxl's `ws.insert_cols(idx, amount)`.
+    ///
+    /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
+    /// affected band overlaps a table range.
+    pub fn insert_cols(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        self.guard_tables(Axis::Col, idx)?;
+        if amount > 0 {
+            self.shift_axis(Axis::Col, idx, i64::from(amount));
+        }
+        Ok(())
+    }
+
+    /// Delete `amount` columns starting at 1-based column `idx`, dropping cells
+    /// in the removed band and shifting later columns left. Mirrors openpyxl's
+    /// `ws.delete_cols(idx, amount)`.
+    ///
+    /// Returns [`OxlsxError::TableIntersection`] (worksheet unchanged) when the
+    /// band overlaps a table range.
+    pub fn delete_cols(&mut self, idx: u32, amount: u32) -> Result<(), OxlsxError> {
+        self.guard_tables(Axis::Col, idx)?;
+        if amount > 0 {
+            self.shift_axis(Axis::Col, idx, -i64::from(amount));
+        }
+        Ok(())
+    }
+
+    /// Append a row of values at the bottom of the sheet, mirroring openpyxl's
+    /// `ws.append(iterable)`.
+    ///
+    /// Values are written into a fresh row (`max_row + 1`, or row 1 when the
+    /// sheet is empty), positionally from column A and contiguous. The Rust core
+    /// is purely positional; sparse/dict shapes are handled by the Python layer.
+    pub fn append(&mut self, values: impl IntoIterator<Item = Value>) {
+        let target_row = self
+            .used_bounds()
+            .map_or(1, |(_, _, _, max_row)| max_row + 1);
+        for (offset, value) in values.into_iter().enumerate() {
+            let col = offset as u32 + 1;
+            let reference = rc_to_a1(target_row, col);
+            self.ensure_cell_mut(&reference).value = value;
+        }
+    }
+
+    /// Move the block of cells in `cell_range` by (`rows`, `cols`), mirroring
+    /// openpyxl's `ws.move_range(cell_range, rows, cols, translate)`.
+    ///
+    /// The source cells are cleared and rewritten at the offset; destination
+    /// cells are overwritten (openpyxl semantics). Formula text moves verbatim.
+    /// Negative offsets are allowed.
+    ///
+    /// Returns:
+    /// - [`OxlsxError::UnsupportedTranslate`] when `translate` is `true`
+    ///   (formula translation is out of scope) — worksheet unchanged.
+    /// - [`OxlsxError::InvalidFormat`] when `cell_range` does not parse, or the
+    ///   move would push any cell to row/column `< 1` — worksheet unchanged.
+    /// - [`OxlsxError::TableIntersection`] when the source OR destination band
+    ///   overlaps a table range — worksheet unchanged.
+    pub fn move_range(
+        &mut self,
+        cell_range: &str,
+        rows: i64,
+        cols: i64,
+        translate: bool,
+    ) -> Result<(), OxlsxError> {
+        if translate {
+            return Err(OxlsxError::UnsupportedTranslate);
+        }
+
+        let Some(((start_col, start_row), (end_col, end_row))) = parse_range(cell_range) else {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "move_range cell_range {cell_range:?} is not a valid A1 range"
+            )));
+        };
+
+        // Normalize endpoints so the rectangle is well-formed regardless of the
+        // order the caller passed them in.
+        let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
+        let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+
+        // Compute the destination band; reject moves that fall off the grid.
+        let dest_min_col = i64::from(min_col) + cols;
+        let dest_min_row = i64::from(min_row) + rows;
+        let dest_max_col = i64::from(max_col) + cols;
+        let dest_max_row = i64::from(max_row) + rows;
+        if dest_min_col < 1 || dest_min_row < 1 {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "move_range would push cells out of bounds (row/col < 1) for {cell_range:?}"
+            )));
+        }
+
+        // Guard the source AND destination bands against table intersection
+        // before any mutation, so a rejected move leaves the worksheet unchanged.
+        self.guard_tables_rect(min_col, max_col, min_row, max_row)?;
+        self.guard_tables_rect(
+            dest_min_col as u32,
+            dest_max_col as u32,
+            dest_min_row as u32,
+            dest_max_row as u32,
+        )?;
+
+        // Collect (and remove) every source cell, re-keying it to the offset.
+        let width = (max_col - min_col + 1) as usize;
+        let height = (max_row - min_row + 1) as usize;
+        let mut moved = Vec::with_capacity(width * height);
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let src_ref = rc_to_a1(row, col);
+                if let Some(mut cell) = self.cells.remove(&src_ref) {
+                    let new_ref = rc_to_a1(
+                        (i64::from(row) + rows) as u32,
+                        (i64::from(col) + cols) as u32,
+                    );
+                    cell.reference = new_ref.clone();
+                    moved.push((new_ref, cell));
+                }
+            }
+        }
+
+        // Write at the destination, overwriting any existing cells there.
+        for (reference, cell) in moved {
+            self.cells.insert(reference, cell);
+        }
+
+        Ok(())
+    }
+
+    /// Reject a row/column shift whose affected band `[idx, u32::MAX]` overlaps
+    /// any table range. Computed before any mutation so a rejected op leaves the
+    /// worksheet untouched.
+    fn guard_tables(&self, axis: Axis, idx: u32) -> Result<(), OxlsxError> {
+        for table in &self.tables {
+            let Some(((start_col, start_row), (end_col, end_row))) = parse_range(&table.ref_range)
+            else {
+                continue;
+            };
+            let (span_start, span_end) = match axis {
+                Axis::Row => (start_row, end_row),
+                Axis::Col => (start_col, end_col),
+            };
+            if bands_intersect(idx, u32::MAX, span_start, span_end) {
+                return Err(OxlsxError::TableIntersection(table.ref_range.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a 2-D rectangular band `[min_col, max_col] x [min_row, max_row]`
+    /// that overlaps any table range. Used by [`move_range`](Self::move_range)
+    /// to guard both the source and destination blocks before any mutation.
+    fn guard_tables_rect(
+        &self,
+        min_col: u32,
+        max_col: u32,
+        min_row: u32,
+        max_row: u32,
+    ) -> Result<(), OxlsxError> {
+        for table in &self.tables {
+            let Some(((start_col, start_row), (end_col, end_row))) = parse_range(&table.ref_range)
+            else {
+                continue;
+            };
+            if bands_intersect(min_col, max_col, start_col, end_col)
+                && bands_intersect(min_row, max_row, start_row, end_row)
+            {
+                return Err(OxlsxError::TableIntersection(table.ref_range.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Unified shift engine: remap every cell key (drain + rebuild to avoid
+    /// collisions), then shift merged ranges and the axis dimension map.
+    fn shift_axis(&mut self, axis: Axis, start: u32, delta: i64) {
+        let old = mem::take(&mut self.cells);
+        let mut rebuilt = HashMap::with_capacity(old.len());
+        for (_, mut cell) in old {
+            let Some((col, row)) = parse_a1(&cell.reference) else {
+                // Keep unparseable keys verbatim rather than dropping data.
+                rebuilt.insert(cell.reference.clone(), cell);
+                continue;
+            };
+            let target = match axis {
+                Axis::Row => row,
+                Axis::Col => col,
+            };
+            if let Some(shifted) = remap_index(target, start, delta) {
+                let (new_row, new_col) = match axis {
+                    Axis::Row => (shifted, col),
+                    Axis::Col => (row, shifted),
+                };
+                let new_ref = rc_to_a1(new_row, new_col);
+                cell.reference = new_ref.clone();
+                rebuilt.insert(new_ref, cell);
+            }
+            // `None` -> cell is inside a deleted band, so it is dropped.
+        }
+        self.cells = rebuilt;
+
+        self.shift_merges(axis, start, delta);
+
+        let dims = match axis {
+            Axis::Row => &mut self.row_heights,
+            Axis::Col => &mut self.column_widths,
+        };
+        shift_dimension_map(dims, start, delta);
+    }
+
+    /// Rebuild `merged_cells` for a shift along `axis`. Fully-before ranges are
+    /// unchanged, fully-after ranges shift by `delta`, and ranges straddling a
+    /// deleted band are dropped (their structure can no longer be preserved).
+    fn shift_merges(&mut self, axis: Axis, start: u32, delta: i64) {
+        let old = mem::take(&mut self.merged_cells);
+        let mut rebuilt = Vec::with_capacity(old.len());
+        for range in old {
+            let Some(((start_col, start_row), (end_col, end_row))) = parse_range(&range) else {
+                rebuilt.push(range);
+                continue;
+            };
+            let (span_start, span_end) = match axis {
+                Axis::Row => (start_row, end_row),
+                Axis::Col => (start_col, end_col),
+            };
+            if let Some((new_start, new_end)) = shift_span(span_start, span_end, start, delta) {
+                let (sr, sc, er, ec) = match axis {
+                    Axis::Row => (new_start, start_col, new_end, end_col),
+                    Axis::Col => (start_row, new_start, end_row, new_end),
+                };
+                rebuilt.push(format!("{}:{}", rc_to_a1(sr, sc), rc_to_a1(er, ec)));
+            }
+        }
+        self.merged_cells = rebuilt;
+    }
+
     pub fn freeze_panes(&self) -> Option<&str> {
         self.freeze_panes.as_deref()
     }
@@ -529,7 +800,7 @@ impl Worksheet {
         let mut max_row = 0;
 
         for reference in self.cells.keys() {
-            let Some((row, col)) = parse_a1(reference) else {
+            let Some((col, row)) = parse_a1(reference) else {
                 continue;
             };
 
@@ -562,18 +833,74 @@ impl Worksheet {
     }
 }
 
-fn parse_a1(reference: &str) -> Option<(u32, u32)> {
-    let col = column_index(reference)?;
-    let row_start = reference
-        .bytes()
-        .position(|b| !b.is_ascii_alphabetic())
-        .unwrap_or(reference.len());
-    if row_start == reference.len() {
-        return None;
+/// The axis a bulk row/column operation acts on.
+#[derive(Debug, Clone, Copy)]
+enum Axis {
+    Row,
+    Col,
+}
+
+/// Remap a single 1-based axis index for a shift of `delta` starting at
+/// `start`. `delta > 0` inserts (indices at/after `start` move up by `delta`);
+/// `delta < 0` deletes `-delta` indices from `start` (indices inside the
+/// removed band return `None`; later indices move down). Indices before `start`
+/// are returned unchanged.
+fn remap_index(index: u32, start: u32, delta: i64) -> Option<u32> {
+    if index < start {
+        return Some(index);
+    }
+    if delta >= 0 {
+        return Some(index + delta as u32);
+    }
+    let amount = (-delta) as u32;
+    if index < start + amount {
+        None
+    } else {
+        Some(index - amount)
+    }
+}
+
+/// Shift an inclusive `[span_start, span_end]` range for a merged cell along the
+/// active axis. Returns `None` when a delete drops the range (it straddles or
+/// sits inside the removed band).
+fn shift_span(span_start: u32, span_end: u32, start: u32, delta: i64) -> Option<(u32, u32)> {
+    if delta >= 0 {
+        let amount = delta as u32;
+        let new_start = if span_start >= start {
+            span_start + amount
+        } else {
+            span_start
+        };
+        let new_end = if span_end >= start {
+            span_end + amount
+        } else {
+            span_end
+        };
+        return Some((new_start, new_end));
     }
 
-    let row = reference.get(row_start..)?.parse::<u32>().ok()?;
-    Some((row, col))
+    let amount = (-delta) as u32;
+    let band_end = start + amount - 1;
+    if span_end < start {
+        Some((span_start, span_end)) // fully before the deleted band
+    } else if span_start > band_end {
+        Some((span_start - amount, span_end - amount)) // fully after
+    } else {
+        None // straddles or sits inside the deleted band -> drop
+    }
+}
+
+/// Rebuild a dimension map (`row_heights` / `column_widths`) keyed by 1-based
+/// index after a shift. Entries inside a deleted band are dropped.
+fn shift_dimension_map(map: &mut HashMap<u32, f64>, start: u32, delta: i64) {
+    let old = mem::take(map);
+    let mut rebuilt = HashMap::with_capacity(old.len());
+    for (index, value) in old {
+        if let Some(shifted) = remap_index(index, start, delta) {
+            rebuilt.insert(shifted, value);
+        }
+    }
+    *map = rebuilt;
 }
 
 #[derive(Debug, Clone)]
@@ -1905,5 +2232,251 @@ mod tests {
         assert_eq!(cell.reference(), "A1");
         assert_eq!(cell.style_id(), StyleId(0));
         assert_eq!(cell.value(), &Value::String("Hola".to_string()));
+    }
+
+    // ---- Bulk-write shift engine (Slice 1) ----
+
+    fn s(value: &str) -> Value {
+        Value::String(value.to_string())
+    }
+
+    #[test]
+    fn insert_rows_shifts_cells_down() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "top");
+        ws.set_cell("A3", "bottom");
+
+        ws.insert_rows(2, 2).unwrap();
+
+        // Rows before the index stay put.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("top"));
+        // Rows at/after the index shift down by `amount`.
+        assert!(ws.cell("A3").is_none());
+        assert_eq!(ws.cell("A5").unwrap().value(), &s("bottom"));
+    }
+
+    #[test]
+    fn delete_rows_shifts_cells_up() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "keep");
+        ws.set_cell("A2", "deleted");
+        ws.set_cell("A3", "mid");
+        ws.set_cell("A4", "move");
+
+        ws.delete_rows(2, 1).unwrap();
+
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("keep"));
+        // The deleted band content is gone; later rows shift up by `amount`.
+        assert_eq!(ws.cell("A2").unwrap().value(), &s("mid"));
+        assert_eq!(ws.cell("A3").unwrap().value(), &s("move"));
+        assert!(ws.cell("A4").is_none());
+    }
+
+    #[test]
+    fn insert_cols_shifts_cells_right() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "left");
+        ws.set_cell("C1", "right");
+
+        ws.insert_cols(2, 2).unwrap();
+
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("left"));
+        assert!(ws.cell("C1").is_none());
+        // C(3) + 2 -> E(5).
+        assert_eq!(ws.cell("E1").unwrap().value(), &s("right"));
+    }
+
+    #[test]
+    fn delete_cols_shifts_cells_left() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "keep");
+        ws.set_cell("B1", "deleted");
+        ws.set_cell("C1", "mid");
+        ws.set_cell("D1", "move");
+
+        ws.delete_cols(2, 1).unwrap();
+
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("keep"));
+        assert_eq!(ws.cell("B1").unwrap().value(), &s("mid"));
+        assert_eq!(ws.cell("C1").unwrap().value(), &s("move"));
+        assert!(ws.cell("D1").is_none());
+    }
+
+    #[test]
+    fn delete_rows_shifts_merged_cells_and_dimensions() {
+        let mut ws = Worksheet::new("S");
+        ws.merge_cells("A1:B2"); // fully before deleted band -> unchanged
+        ws.merge_cells("A2:B4"); // straddles deleted band -> dropped
+        ws.merge_cells("A5:B6"); // fully after deleted band -> shifts up by 1
+        ws.row_height(1, 10.0); // before -> unchanged
+        ws.row_height(3, 30.0); // inside deleted band -> dropped
+        ws.row_height(5, 50.0); // after -> shifts to row 4
+
+        ws.delete_rows(3, 1).unwrap();
+
+        assert!(ws.merged_cells.contains(&"A1:B2".to_string()));
+        assert!(ws.merged_cells.contains(&"A4:B5".to_string()));
+        // The partial-straddle merge is dropped, not shifted.
+        assert_eq!(ws.merged_cells.len(), 2);
+        assert!(
+            !ws.merged_cells
+                .iter()
+                .any(|range| range.contains("A2") || range.contains("B4"))
+        );
+
+        assert_eq!(ws.row_heights.get(&1), Some(&10.0));
+        assert_eq!(ws.row_heights.get(&4), Some(&50.0));
+        assert!(!ws.row_heights.contains_key(&3));
+        assert!(!ws.row_heights.contains_key(&5));
+        assert_eq!(ws.row_heights.len(), 2);
+    }
+
+    #[test]
+    fn bulk_op_intersecting_table_returns_err() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "H1");
+        ws.set_cell("B1", "H2");
+        ws.set_cell("C1", "H3");
+        ws.add_table(crate::Table::new("T", "A1:C3")).unwrap();
+
+        let cells_before = ws.cells().len();
+
+        // Row op intersecting the table band -> Err, worksheet unchanged.
+        let err = ws.insert_rows(2, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+        assert_eq!(ws.cells().len(), cells_before);
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("H1"));
+
+        // Delete intersecting the table band -> Err.
+        let err = ws.delete_rows(1, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+
+        // Column op intersecting the table band -> Err.
+        let err = ws.insert_cols(2, 1).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+
+        // An op fully outside the table band is allowed.
+        ws.insert_rows(10, 1).unwrap();
+        ws.insert_cols(10, 1).unwrap();
+        assert_eq!(ws.cells().len(), cells_before);
+    }
+
+    #[test]
+    fn delete_rows_does_not_translate_formulas() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("B3", Value::Formula("=A3+1".to_string()));
+
+        ws.delete_rows(1, 1).unwrap();
+
+        // The cell moves up one row, but its formula text is untouched.
+        assert!(ws.cell("B3").is_none());
+        assert_eq!(
+            ws.cell("B2").unwrap().value(),
+            &Value::Formula("=A3+1".to_string())
+        );
+    }
+
+    // ---- Bulk-write append + move_range (Slice 2) ----
+
+    #[test]
+    fn append_adds_row_at_bottom() {
+        // Empty sheet: append lands at row 1, starting at column A, contiguous.
+        let mut ws = Worksheet::new("S");
+        ws.append([s("a"), s("b"), s("c")]);
+        assert_eq!(ws.max_row(), 1);
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a"));
+        assert_eq!(ws.cell("B1").unwrap().value(), &s("b"));
+        assert_eq!(ws.cell("C1").unwrap().value(), &s("c"));
+
+        // Append after existing rows lands at max_row + 1.
+        ws.set_cell("A3", "existing");
+        ws.append([Value::Number(1.0), Value::Number(2.0)]);
+        assert_eq!(ws.cell("A4").unwrap().value(), &Value::Number(1.0));
+        assert_eq!(ws.cell("B4").unwrap().value(), &Value::Number(2.0));
+        // Pre-existing rows untouched.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a"));
+        assert_eq!(ws.cell("A3").unwrap().value(), &s("existing"));
+        assert_eq!(ws.max_row(), 4);
+    }
+
+    #[test]
+    fn move_range_relocates_block() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+        ws.set_cell("B1", "b1");
+        ws.set_cell("A2", Value::Formula("=A1+1".to_string()));
+        // Destination cell that must be overwritten by the move.
+        ws.set_cell("C3", "victim");
+
+        // Move A1:B2 down 2 rows, right 2 cols (translate=false).
+        ws.move_range("A1:B2", 2, 2, false).unwrap();
+
+        // Source cells cleared.
+        assert!(ws.cell("A1").is_none());
+        assert!(ws.cell("B1").is_none());
+        assert!(ws.cell("A2").is_none());
+
+        // Destination has the relocated cells.
+        assert_eq!(ws.cell("C3").unwrap().value(), &s("a1"));
+        assert_eq!(ws.cell("D3").unwrap().value(), &s("b1"));
+        // Formula text rides verbatim (no translation).
+        assert_eq!(
+            ws.cell("C4").unwrap().value(),
+            &Value::Formula("=A1+1".to_string())
+        );
+        // Destination overwrite verified: C3 was "victim", now "a1".
+    }
+
+    #[test]
+    fn move_range_translate_true_is_unsupported() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+
+        let err = ws.move_range("A1:B2", 1, 1, true).unwrap_err();
+        assert!(matches!(err, OxlsxError::UnsupportedTranslate));
+        // Worksheet unchanged on rejection.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
+    }
+
+    #[test]
+    fn move_range_intersecting_table_returns_err() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "H1");
+        ws.set_cell("B1", "H2");
+        ws.set_cell("C1", "H3");
+        ws.add_table(crate::Table::new("T", "A1:C3")).unwrap();
+        let cells_before = ws.cells().len();
+
+        // Source band intersects the table -> Err, worksheet unchanged.
+        let err = ws.move_range("A1:B2", 10, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+        assert_eq!(ws.cells().len(), cells_before);
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("H1"));
+
+        // Destination band intersects the table -> Err, worksheet unchanged.
+        ws.set_cell("F10", "src");
+        let cells_before = ws.cells().len();
+        let err = ws.move_range("F10", -9, -3, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+        assert_eq!(ws.cells().len(), cells_before);
+        assert_eq!(ws.cell("F10").unwrap().value(), &s("src"));
+    }
+
+    #[test]
+    fn move_range_out_of_bounds_returns_err() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+        ws.set_cell("B2", "b2");
+
+        // Moving up would push row 1 to row 0 (< 1) -> Err, unchanged.
+        let err = ws.move_range("A1:B2", -1, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("b2"));
+
+        // Moving left would push col A to col 0 (< 1) -> Err, unchanged.
+        let err = ws.move_range("A1:B2", 0, -1, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
     }
 }

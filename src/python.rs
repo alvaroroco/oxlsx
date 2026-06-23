@@ -8,7 +8,7 @@ use crate::{
 };
 use chrono::Datelike;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[pymodule]
@@ -718,6 +718,84 @@ impl PyWorksheet {
             .sheet_mut(self.sheet_index)
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
         sheet.add_table(table_to_add).map_err(map_oxlsx_error)
+    }
+
+    /// Append a row at the bottom, mirroring openpyxl's `ws.append(iterable)`.
+    ///
+    /// Accepts either a positional iterable (list / tuple / generator), placed
+    /// from column A, or a `dict` keyed by column letters (`"A"`, `"AB"`) and/or
+    /// 1-based integer column indices (`1`, `27`), with the two key forms freely
+    /// mixed. Dict gaps are padded with empty cells up to the largest column
+    /// key, matching openpyxl's dict-append semantics.
+    fn append(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
+        let values = append_values_from_py(iterable)?;
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.append(values);
+        Ok(())
+    }
+
+    /// Insert `amount` blank rows before 1-based `idx`, mirroring openpyxl's
+    /// `ws.insert_rows(idx, amount=1)`.
+    #[pyo3(signature = (idx, amount=1))]
+    fn insert_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.insert_rows(idx, amount).map_err(map_oxlsx_error)
+    }
+
+    /// Delete `amount` rows starting at 1-based `idx`, mirroring openpyxl's
+    /// `ws.delete_rows(idx, amount=1)`.
+    #[pyo3(signature = (idx, amount=1))]
+    fn delete_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.delete_rows(idx, amount).map_err(map_oxlsx_error)
+    }
+
+    /// Insert `amount` blank columns before 1-based `idx`, mirroring openpyxl's
+    /// `ws.insert_cols(idx, amount=1)`.
+    #[pyo3(signature = (idx, amount=1))]
+    fn insert_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.insert_cols(idx, amount).map_err(map_oxlsx_error)
+    }
+
+    /// Delete `amount` columns starting at 1-based `idx`, mirroring openpyxl's
+    /// `ws.delete_cols(idx, amount=1)`.
+    #[pyo3(signature = (idx, amount=1))]
+    fn delete_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet.delete_cols(idx, amount).map_err(map_oxlsx_error)
+    }
+
+    /// Relocate `cell_range` by (`rows`, `cols`), mirroring openpyxl's
+    /// `ws.move_range(cell_range, rows=0, cols=0, translate=False)`.
+    ///
+    /// Unlike openpyxl, oxlsx does not model formula translation, so
+    /// `translate=True` raises `NotImplementedError` (an honest divergence). A
+    /// range intersecting a table raises `ValueError`.
+    #[pyo3(signature = (cell_range, rows=0, cols=0, translate=false))]
+    fn move_range(&self, cell_range: &str, rows: i64, cols: i64, translate: bool) -> PyResult<()> {
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet
+            .move_range(cell_range, rows, cols, translate)
+            .map_err(map_oxlsx_error)
     }
 }
 
@@ -1441,11 +1519,70 @@ fn map_oxlsx_error(err: OxlsxError) -> PyErr {
         OxlsxError::InvalidFormat(message) | OxlsxError::MissingPart(message) => {
             pyo3::exceptions::PyValueError::new_err(message)
         }
-        OxlsxError::DuplicateTableName(_) => {
+        OxlsxError::DuplicateTableName(_) | OxlsxError::TableIntersection(_) => {
             pyo3::exceptions::PyValueError::new_err(err.to_string())
+        }
+        OxlsxError::UnsupportedTranslate => {
+            pyo3::exceptions::PyNotImplementedError::new_err(err.to_string())
         }
         other => pyo3::exceptions::PyIOError::new_err(other.to_string()),
     }
+}
+
+/// Build the contiguous positional `Vec<Value>` consumed by [`Worksheet::append`]
+/// from an openpyxl-style `ws.append(...)` argument.
+///
+/// A `dict` is keyed by column letters and/or 1-based integer indices (mixed
+/// allowed); gaps are padded with [`Value::Empty`] up to the largest key. Any
+/// other object is treated as a positional iterable (list / tuple / generator),
+/// placed from column A.
+fn append_values_from_py(iterable: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
+    if let Ok(dict) = iterable.downcast::<PyDict>() {
+        let mut entries: Vec<(u32, Value)> = Vec::with_capacity(dict.len());
+        let mut max_col = 0u32;
+        for (key, value) in dict.iter() {
+            let col = append_column_from_key(&key)?;
+            max_col = max_col.max(col);
+            entries.push((col, py_to_value(&value)?));
+        }
+
+        let mut values = vec![Value::Empty; max_col as usize];
+        for (col, value) in entries {
+            values[(col - 1) as usize] = value;
+        }
+        return Ok(values);
+    }
+
+    let mut values = Vec::new();
+    for item in iterable.iter()? {
+        values.push(py_to_value(&item?)?);
+    }
+    Ok(values)
+}
+
+/// Resolve a single `dict` key from `ws.append({...})` into a 1-based column
+/// index. Integer keys are used directly (openpyxl semantics); string keys are
+/// parsed as column letters. Mirrors openpyxl by raising `ValueError` on a
+/// column index `< 1`, an unparsable letter, or an unsupported key type.
+fn append_column_from_key(key: &Bound<'_, PyAny>) -> PyResult<u32> {
+    if let Ok(letters) = key.extract::<String>() {
+        return column_index_from_letters(&letters).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("{letters:?} is not a valid column"))
+        });
+    }
+
+    if let Ok(index) = key.extract::<i64>() {
+        if index < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "column index {index} out of bounds; must be >= 1"
+            )));
+        }
+        return Ok(index as u32);
+    }
+
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "append dict keys must be column letters or 1-based integers",
+    ))
 }
 
 // These tests exercise the PyO3 bindings through a real, interpreter-linked
