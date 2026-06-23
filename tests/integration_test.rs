@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use oxlsx::{
-    Color, Comment, Fill, Font, OxlsxError, StyleId, Table, TableStyleInfo, Value, Workbook,
+    Color, Comment, ConditionalRule, Dxf, Fill, Font, OxlsxError, StyleId, Table, TableStyleInfo,
+    Value, Workbook,
 };
 use std::env;
 use std::fs;
@@ -2713,6 +2714,367 @@ fn auto_filter_rmw_preserves() {
     assert!(
         sheet_xml.contains("<autoFilter ref=\"A1:C3\""),
         "autoFilter preserved on RMW: {sheet_xml}"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+// --- Conditional formatting Slice 1: Dxf infra + gated <dxfs> emission ------
+
+/// Empty dxf registry MUST emit NOTHING: a workbook with no conditional
+/// formatting writes no `<dxfs>` in styles.xml, keeping output byte-identical to
+/// the pre-CF behavior. Explicitly re-checks the tables_totals byte-equality
+/// discriminator so a regression here surfaces in the same test.
+#[test]
+fn no_cf_keeps_styles_byte_identical() {
+    let path = temp_path("oxlsx_no_cf_styles.xlsx");
+    fs::copy("samples/tables_totals.xlsx", &path).unwrap();
+
+    // tables_totals.xlsx has NO conditional formatting and NO <dxfs>.
+    let source_styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        !source_styles.contains("<dxfs"),
+        "fixture must have no dxfs"
+    );
+    let original_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+
+    let mut wb = Workbook::open(&path).unwrap();
+    wb.active_mut().unwrap().set_cell("H10", "unrelated");
+    wb.save(&path).unwrap();
+
+    // The empty registry gate must keep <dxfs> out of styles.xml entirely.
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        !styles_xml.contains("<dxfs"),
+        "no-CF workbook must not emit <dxfs>: {styles_xml}"
+    );
+
+    // Byte-equality discriminator: the clean table is re-emitted verbatim.
+    let saved_table1 = read_zip_entry(&path, "xl/tables/table1.xml");
+    assert_eq!(
+        saved_table1, original_table1,
+        "clean table must stay byte-for-byte after RMW"
+    );
+
+    // Reopens cleanly.
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
+
+/// RMW preserves source `<dxfs>`: opening an openpyxl-authored file that already
+/// has a dxf, editing an unrelated cell, and saving keeps the dxf in styles.xml
+/// (count unchanged, fill colors intact).
+#[test]
+fn rmw_preserves_source_dxfs() {
+    let path = temp_path("oxlsx_rmw_dxfs.xlsx");
+    fs::copy("samples/conditional_format.xlsx", &path).unwrap();
+
+    // The fixture has exactly one dxf with a solid FFC7CE fill.
+    let source_styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        source_styles.contains("<dxfs count=\"1\""),
+        "fixture must start with one dxf: {source_styles}"
+    );
+
+    let mut wb = Workbook::open(&path).unwrap();
+    wb.active_mut().unwrap().set_cell("C5", "unrelated");
+    wb.save(&path).unwrap();
+
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        styles_xml.contains("<dxfs count=\"1\""),
+        "source dxf count must be preserved on RMW: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("<dxf>"),
+        "the dxf element must survive RMW: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("patternType=\"solid\""),
+        "preserved dxf fill pattern intact: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("00FFC7CE"),
+        "preserved dxf fill color intact: {styles_xml}"
+    );
+
+    // Reopens cleanly and the dxf is re-readable.
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
+
+// --- Conditional formatting Slice 2: rule model + emission + RMW CF ----------
+
+fn solid_fill_dxf(rgb: &str) -> Dxf {
+    Dxf {
+        font: None,
+        fill: Some(Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: Some(Color::Argb(rgb.to_string())),
+            bg_color: Some(Color::Argb(rgb.to_string())),
+        }),
+    }
+}
+
+/// Scenario 1: a FormulaRule (`type="expression"`) serializes a
+/// `<conditionalFormatting>` block with an XML-escaped `<formula>` and its
+/// differential format is registered as the sole `<dxfs>` entry.
+#[test]
+fn formula_rule_write_and_dxf_emitted() {
+    let path = temp_path("oxlsx_cf_formula_rule.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", 1.0_f64);
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::formula(vec!["$A1>5".to_string()], solid_fill_dxf("00FFC7CE")),
+    )
+    .unwrap();
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains("<conditionalFormatting sqref=\"A1:A10\">"),
+        "missing conditionalFormatting block: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("type=\"expression\""),
+        "missing expression type: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("priority=\"1\""),
+        "missing priority: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("dxfId=\"0\""),
+        "missing dxfId: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("<formula>$A1&gt;5</formula>"),
+        "formula must be XML-escaped: {sheet_xml}"
+    );
+
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        styles_xml.contains("<dxfs count=\"1\">"),
+        "single dxf must be emitted: {styles_xml}"
+    );
+    assert!(
+        styles_xml.contains("patternType=\"solid\""),
+        "dxf fill pattern emitted: {styles_xml}"
+    );
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 2: a CellIsRule (`type="cellIs"`) emits an `operator` attribute and
+/// its operand `<formula>`.
+#[test]
+fn cell_is_rule_write() {
+    let path = temp_path("oxlsx_cf_cell_is_rule.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", 1.0_f64);
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::cell_is(
+            "greaterThan",
+            vec!["5".to_string()],
+            solid_fill_dxf("00FFC7CE"),
+        ),
+    )
+    .unwrap();
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains("type=\"cellIs\""),
+        "missing cellIs type: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("operator=\"greaterThan\""),
+        "missing operator: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("<formula>5</formula>"),
+        "missing operand formula: {sheet_xml}"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 3: conditional formatting written by oxlsx is re-readable by oxlsx —
+/// type, formulas, priority, and the linked differential format all survive.
+#[test]
+fn conditional_formatting_round_trip() {
+    let path = temp_path("oxlsx_cf_round_trip.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", 1.0_f64);
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::cell_is(
+            "lessThan",
+            vec!["3".to_string()],
+            solid_fill_dxf("00C6EFCE"),
+        ),
+    )
+    .unwrap();
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    let ws2 = wb2.active().unwrap();
+    let cf = ws2.conditional_formatting();
+    assert_eq!(cf.len(), 1, "one conditional formatting block expected");
+    assert_eq!(cf[0].sqref, "A1:A10");
+    assert_eq!(cf[0].rules.len(), 1);
+    let rule = &cf[0].rules[0];
+    assert_eq!(rule.type_ext, "cellIs");
+    assert_eq!(rule.operator.as_deref(), Some("lessThan"));
+    assert_eq!(rule.formulas, vec!["3".to_string()]);
+    assert_eq!(rule.priority, Some(1));
+    let dxf = rule.dxf.as_ref().expect("rule must resolve its dxf");
+    let fill = dxf.fill.as_ref().expect("dxf has a fill");
+    assert_eq!(fill.fg_color, Some(Color::Argb("00C6EFCE".to_string())));
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 5: RMW of an openpyxl-authored file with an unmodeled `colorScale`
+/// rule (raw) plus a modeled formula rule preserves BOTH source rules and the
+/// source dxf, while a newly added rule's dxf appends without collision.
+#[test]
+fn cf_rmw_preserves_source_dxfs_and_rules() {
+    let path = temp_path("oxlsx_cf_rmw.xlsx");
+    fs::copy("samples/conditional_format_mixed.xlsx", &path).unwrap();
+
+    // The fixture starts with exactly one dxf (the formula rule's fill).
+    let source_styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        source_styles.contains("<dxfs count=\"1\""),
+        "fixture must start with one dxf: {source_styles}"
+    );
+
+    let mut wb = Workbook::open(&path).unwrap();
+    let ws = wb.active_mut().unwrap();
+    let new_dxf = Dxf {
+        font: Some(Font {
+            bold: true,
+            color: Some(Color::Argb("009C0006".to_string())),
+            ..Font::default()
+        }),
+        fill: None,
+    };
+    ws.add_conditional_formatting(
+        "B1:B3",
+        ConditionalRule::formula(vec!["$B1>0".to_string()], new_dxf),
+    )
+    .unwrap();
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    // Source unmodeled colorScale survives as raw XML.
+    assert!(
+        sheet_xml.contains("type=\"colorScale\""),
+        "unmodeled colorScale rule must survive: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("<colorScale>"),
+        "colorScale child must survive verbatim: {sheet_xml}"
+    );
+    // Source modeled formula rule survives.
+    assert!(
+        sheet_xml.contains("<formula>$A2&gt;5</formula>"),
+        "source formula rule must survive: {sheet_xml}"
+    );
+    // New rule present.
+    assert!(
+        sheet_xml.contains("sqref=\"B1:B3\""),
+        "new rule sqref must be present: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("<formula>$B1&gt;0</formula>"),
+        "new rule formula must be present: {sheet_xml}"
+    );
+
+    // New dxf appended after the preserved source dxf (count grows to 2),
+    // and the new rule references dxfId >= 1 (no collision with source id 0).
+    let styles_xml = read_zip_entry(&path, "xl/styles.xml");
+    assert!(
+        styles_xml.contains("<dxfs count=\"2\""),
+        "new dxf must append after the preserved source dxf: {styles_xml}"
+    );
+    assert!(
+        sheet_xml.contains("dxfId=\"1\""),
+        "new rule's dxfId must be 1 (non-colliding): {sheet_xml}"
+    );
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert!(wb2.active().is_some());
+
+    fs::remove_file(path).ok();
+}
+
+/// Scenario 6: multiple rules registered against the same sqref get distinct
+/// sequential priorities, and a `stop_if_true` rule serializes `stopIfTrue="1"`.
+#[test]
+fn multiple_rules_priorities_and_stopiftrue() {
+    let path = temp_path("oxlsx_cf_multi.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", 1.0_f64);
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::formula(vec!["$A1>9".to_string()], solid_fill_dxf("00FFC7CE")),
+    )
+    .unwrap();
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::formula(vec!["$A1>5".to_string()], solid_fill_dxf("00FFEB9C"))
+            .with_stop_if_true(true),
+    )
+    .unwrap();
+    ws.add_conditional_formatting(
+        "A1:A10",
+        ConditionalRule::cell_is(
+            "greaterThan",
+            vec!["1".to_string()],
+            solid_fill_dxf("00C6EFCE"),
+        ),
+    )
+    .unwrap();
+    wb.save(&path).unwrap();
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    // Same sqref groups into a single block.
+    assert_eq!(
+        sheet_xml.matches("<conditionalFormatting").count(),
+        1,
+        "same-sqref rules must group into one block: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("priority=\"1\""),
+        "priority 1: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("priority=\"2\""),
+        "priority 2: {sheet_xml}"
+    );
+    assert!(
+        sheet_xml.contains("priority=\"3\""),
+        "priority 3: {sheet_xml}"
+    );
+    assert_eq!(
+        sheet_xml.matches("stopIfTrue=\"1\"").count(),
+        1,
+        "exactly the stop_if_true rule serializes stopIfTrue=\"1\": {sheet_xml}"
     );
 
     fs::remove_file(path).ok();

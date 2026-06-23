@@ -1,7 +1,7 @@
 use crate::styles::CellXf;
 use crate::{
-    Color, Comment, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value, Workbook, Worksheet,
-    defined_names, sheet_rels,
+    Color, Comment, ConditionalRule, Dxf, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value,
+    Workbook, Worksheet, defined_names, sheet_rels,
 };
 use chrono::NaiveDate;
 use indexmap::IndexMap;
@@ -21,7 +21,11 @@ pub(crate) struct CollectedStyles {
     pub fills: Vec<Fill>,
     pub cell_xfs: Vec<CellXf>,
     pub num_fmts: Vec<(u32, String)>,
+    pub dxfs: Vec<Dxf>,
     pub cell_style_ids: HashMap<(usize, String), u32>,
+    /// `(sheet_idx, cf_block_idx, rule_idx)` → resolved `dxfId` for every
+    /// conditional-formatting rule that carries a differential format.
+    pub rule_dxf_ids: HashMap<(usize, usize, usize), u32>,
 }
 
 // Returns (row, col) for sorting cells in sheet XML.
@@ -171,6 +175,38 @@ pub(crate) fn collect_styles(
         }
     }
 
+    // Seed the dxf registry from the source on RMW so conditional-formatting
+    // differential formats survive a re-save. Fresh workbooks start empty; the
+    // empty registry gates `<dxfs>` emission off entirely (byte-identical
+    // styles.xml for all no-CF files).
+    let mut dxfs = if preserve_original {
+        original
+            .map(|source| source.dxfs.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Register each conditional-formatting rule's differential format. Modeled
+    // rules find-or-push their `Dxf` (deduping, and on RMW mapping back to the
+    // already-seeded source index). Rules parsed without a `Dxf` but with a
+    // source `dxfId` keep that id. Unmodeled rules (e.g. colorScale) get none.
+    let mut rule_dxf_ids = HashMap::new();
+    for (sheet_idx, sheet) in sheets.iter().enumerate() {
+        for (cf_idx, block) in sheet.conditional_formatting().iter().enumerate() {
+            for (rule_idx, rule) in block.rules.iter().enumerate() {
+                let dxf_id = if let Some(dxf) = &rule.dxf {
+                    Some(find_or_push(&mut dxfs, dxf.clone()) as u32)
+                } else {
+                    rule.dxf_id
+                };
+                if let Some(dxf_id) = dxf_id {
+                    rule_dxf_ids.insert((sheet_idx, cf_idx, rule_idx), dxf_id);
+                }
+            }
+        }
+    }
+
     num_fmts.sort_by_key(|(id, _)| *id);
 
     CollectedStyles {
@@ -178,7 +214,9 @@ pub(crate) fn collect_styles(
         fills,
         cell_xfs,
         num_fmts,
+        dxfs,
         cell_style_ids,
+        rule_dxf_ids,
     }
 }
 
@@ -407,7 +445,7 @@ fn write_xlsx_to_path(
             options,
             ws,
             idx,
-            &collected.cell_style_ids,
+            &collected,
             &shared_strings,
             &SheetRelRefs {
                 legacy_drawing_rid: legacy_drawing_rid.as_deref(),
@@ -1040,6 +1078,17 @@ fn write_styles_xml(
     )?;
     write_end(&mut xml, "cellStyles")?;
 
+    // `<dxfs>` follows `<cellStyles>` in CT_Stylesheet child order. Emit it ONLY
+    // when the registry is non-empty so no-CF files stay byte-identical.
+    if !collected.dxfs.is_empty() {
+        let count = collected.dxfs.len().to_string();
+        write_start(&mut xml, "dxfs", &[("count", count.as_str())])?;
+        for dxf in &collected.dxfs {
+            write_dxf(&mut xml, dxf)?;
+        }
+        write_end(&mut xml, "dxfs")?;
+    }
+
     write_end(&mut xml, "styleSheet")?;
     write_zip_entry(zip, options, "xl/styles.xml", xml.into_inner())
 }
@@ -1087,6 +1136,109 @@ pub(crate) fn write_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), O
 
     write_end(xml, "patternFill")?;
     write_end(xml, "fill")
+}
+
+/// Serialize one `<dxf>` (conditional-formatting differential format) matching
+/// openpyxl's shape: optional `<font>` then optional `<fill>`. Unlike cell
+/// fonts/fills, a dxf only emits the properties it actually overrides — no
+/// default `sz`/`name` injection — and its fill emits BOTH `fgColor` and
+/// `bgColor`.
+fn write_dxf(xml: &mut Writer<Vec<u8>>, dxf: &Dxf) -> Result<(), OxlsxError> {
+    write_start(xml, "dxf", &[])?;
+    if let Some(font) = &dxf.font {
+        write_dxf_font(xml, font)?;
+    }
+    if let Some(fill) = &dxf.fill {
+        write_dxf_fill(xml, fill)?;
+    }
+    write_end(xml, "dxf")
+}
+
+fn write_dxf_font(xml: &mut Writer<Vec<u8>>, font: &Font) -> Result<(), OxlsxError> {
+    write_start(xml, "font", &[])?;
+    if font.bold {
+        write_empty(xml, "b", &[("val", "1")])?;
+    }
+    if font.italic {
+        write_empty(xml, "i", &[("val", "1")])?;
+    }
+    if font.size > 0.0 {
+        let size = font.size.to_string();
+        write_empty(xml, "sz", &[("val", size.as_str())])?;
+    }
+    if !font.name.is_empty() {
+        write_empty(xml, "name", &[("val", font.name.as_str())])?;
+    }
+    if let Some(color) = &font.color {
+        write_color(xml, "color", color)?;
+    }
+    write_end(xml, "font")
+}
+
+fn write_dxf_fill(xml: &mut Writer<Vec<u8>>, fill: &Fill) -> Result<(), OxlsxError> {
+    write_start(xml, "fill", &[])?;
+    write_start(
+        xml,
+        "patternFill",
+        &[("patternType", fill.pattern_type.as_str())],
+    )?;
+    if let Some(color) = &fill.fg_color {
+        write_color(xml, "fgColor", color)?;
+    }
+    if let Some(color) = &fill.bg_color {
+        write_color(xml, "bgColor", color)?;
+    }
+    write_end(xml, "patternFill")?;
+    write_end(xml, "fill")
+}
+
+/// Serialize one conditional-formatting `<cfRule>`.
+///
+/// Attribute order matches openpyxl exactly: `type, priority, [operator],
+/// [dxfId], [stopIfTrue="1"]`, followed by any preserved unmodeled attributes.
+/// `<formula>` children are XML-escaped; captured unmodeled child XML (e.g. a
+/// `<colorScale>`) is written back verbatim.
+fn write_cf_rule(
+    xml: &mut Writer<Vec<u8>>,
+    rule: &ConditionalRule,
+    dxf_id: Option<u32>,
+) -> Result<(), OxlsxError> {
+    let priority = rule.priority.unwrap_or(1).to_string();
+    let mut attrs: Vec<(&str, String)> =
+        vec![("type", rule.type_ext.clone()), ("priority", priority)];
+    if let Some(operator) = &rule.operator {
+        attrs.push(("operator", operator.clone()));
+    }
+    if let Some(dxf_id) = dxf_id {
+        attrs.push(("dxfId", dxf_id.to_string()));
+    }
+    if rule.stop_if_true {
+        attrs.push(("stopIfTrue", "1".to_string()));
+    }
+    for (key, value) in &rule.unmodeled_attrs {
+        attrs.push((key.as_str(), value.clone()));
+    }
+
+    let attr_refs = attrs
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect::<Vec<_>>();
+    write_start(xml, "cfRule", attr_refs.as_slice())?;
+
+    for formula in &rule.formulas {
+        write_start(xml, "formula", &[])?;
+        xml.write_event(Event::Text(BytesText::new(formula)))?;
+        write_end(xml, "formula")?;
+    }
+
+    // Re-emit any captured unmodeled child subtree (e.g. `<colorScale>`)
+    // verbatim. `BytesText` would escape it, so write the raw bytes directly.
+    if !rule.unmodeled_children.is_empty() {
+        xml.get_mut()
+            .extend_from_slice(rule.unmodeled_children.as_bytes());
+    }
+
+    write_end(xml, "cfRule")
 }
 
 fn write_shared_strings_xml(
@@ -1142,10 +1294,12 @@ fn write_sheet_xml(
     options: SimpleFileOptions,
     ws: &Worksheet,
     sheet_idx: usize,
-    style_ids: &HashMap<(usize, String), u32>,
+    collected: &CollectedStyles,
     shared_strings: &IndexMap<String, usize>,
     rel_refs: &SheetRelRefs<'_>,
 ) -> Result<(), OxlsxError> {
+    let style_ids = &collected.cell_style_ids;
+    let cf_dxf_ids = &collected.rule_dxf_ids;
     let SheetRelRefs {
         legacy_drawing_rid,
         table_rids,
@@ -1280,6 +1434,23 @@ fn write_sheet_xml(
             write_empty(&mut xml, "mergeCell", &[("ref", range_ref.as_str())])?;
         }
         write_end(&mut xml, "mergeCells")?;
+    }
+
+    // `<conditionalFormatting>` MUST follow `<mergeCells>` (and precede
+    // `<hyperlinks>`) per CT_Worksheet ordering. Each block emits its `sqref`
+    // and its `<cfRule>` children; modeled rules resolve their `dxfId` from the
+    // collected registry, unmodeled rules re-emit their captured XML verbatim.
+    for (cf_idx, block) in ws.conditional_formatting().iter().enumerate() {
+        write_start(
+            &mut xml,
+            "conditionalFormatting",
+            &[("sqref", block.sqref.as_str())],
+        )?;
+        for (rule_idx, rule) in block.rules.iter().enumerate() {
+            let dxf_id = cf_dxf_ids.get(&(sheet_idx, cf_idx, rule_idx)).copied();
+            write_cf_rule(&mut xml, rule, dxf_id)?;
+        }
+        write_end(&mut xml, "conditionalFormatting")?;
     }
 
     // `<hyperlinks>` MUST follow `<mergeCells>` and precede `<pageMargins>` /

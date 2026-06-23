@@ -9,6 +9,7 @@ A failure in both → bad fixture or broken sample file.
 import datetime
 import os
 import tempfile
+import warnings
 import zipfile
 
 import openpyxl
@@ -1392,4 +1393,91 @@ def test_move_range():
     ws_t["A1"] = "=B1"
     with pytest.raises(NotImplementedError):
         ws_t.move_range("A1", rows=1, cols=0, translate=True)
+
+
+# ---------------------------------------------------------------------------
+# Conditional formatting (cross-engine: oxlsx writes -> openpyxl reads)
+# ---------------------------------------------------------------------------
+
+
+def _openpyxl_load_no_repair(path):
+    """Load with openpyxl, escalating any repair UserWarning to an error."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        return openpyxl.load_workbook(path)
+
+
+def test_formula_rule_round_trip():
+    # oxlsx writes a FormulaRule (cfRule type="expression"); openpyxl reopens
+    # it with no repair and reads the expression + range back.
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    fill = oxlsx.PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    ws.conditional_formatting.add("A1:A10", oxlsx.FormulaRule(formula=["$A1>5"], fill=fill))
+
+    path = _temp_xlsx("oxlsx_py_formula_rule_round_trip.xlsx")
+    try:
+        wb.save(path)
+        ws2 = _openpyxl_load_no_repair(path).active
+        ranges = list(ws2.conditional_formatting)
+        assert len(ranges) == 1
+        assert str(ranges[0].sqref) == "A1:A10"
+        rules = ranges[0].rules
+        assert len(rules) == 1
+        assert rules[0].type == "expression"
+        assert rules[0].formula == ["$A1>5"]
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_cell_is_rule():
+    # oxlsx writes a CellIsRule (cfRule type="cellIs" + operator); openpyxl
+    # reopens it and reads the operator + operand formula back.
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    fill = oxlsx.PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    ws.conditional_formatting.add(
+        "B1:B10", oxlsx.CellIsRule(operator="greaterThan", formula=["5"], fill=fill)
+    )
+
+    path = _temp_xlsx("oxlsx_py_cell_is_rule.xlsx")
+    try:
+        wb.save(path)
+        ws2 = _openpyxl_load_no_repair(path).active
+        ranges = list(ws2.conditional_formatting)
+        assert len(ranges) == 1
+        assert str(ranges[0].sqref) == "B1:B10"
+        rule = ranges[0].rules[0]
+        assert rule.type == "cellIs"
+        assert rule.operator == "greaterThan"
+        assert rule.formula == ["5"]
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_conditional_formatting_with_pattern_fill():
+    # The dxf fill attached to a rule survives to openpyxl: the read-back rule
+    # resolves a DifferentialStyle whose fill carries the FFC7CE color.
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    fill = oxlsx.PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    ws.conditional_formatting.add("A1:A5", oxlsx.FormulaRule(formula=["$A1>5"], fill=fill))
+
+    path = _temp_xlsx("oxlsx_py_cf_with_pattern_fill.xlsx")
+    try:
+        wb.save(path)
+        ws2 = _openpyxl_load_no_repair(path).active
+        rule = list(ws2.conditional_formatting)[0].rules[0]
+        assert rule.dxf is not None
+        dxf_fill = rule.dxf.fill
+        assert dxf_fill is not None
+        rgb = (dxf_fill.bgColor.rgb if dxf_fill.bgColor else None) or (
+            dxf_fill.fgColor.rgb if dxf_fill.fgColor else None
+        )
+        assert rgb is not None and "FFC7CE" in rgb
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
