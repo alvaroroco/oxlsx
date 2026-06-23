@@ -3,8 +3,8 @@
 
 use crate::coords::{column_index_from_letters, column_letter_from_index, rc_to_a1};
 use crate::{
-    Cell, Color, Comment, DefinedName, DefinedNames, Fill, Font, Hyperlink, OxlsxError, StyleSheet,
-    Table, TableColumn, TableStyleInfo, Value, Workbook,
+    Cell, Color, Comment, ConditionalRule, DefinedName, DefinedNames, Dxf, Fill, Font, Hyperlink,
+    OxlsxError, StyleSheet, Table, TableColumn, TableStyleInfo, Value, Workbook,
 };
 use chrono::Datelike;
 use pyo3::prelude::*;
@@ -31,6 +31,9 @@ fn oxlsx(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTable>()?;
     m.add_class::<PyTableColumn>()?;
     m.add_class::<PyTableStyleInfo>()?;
+    m.add_class::<PyFormulaRule>()?;
+    m.add_class::<PyCellIsRule>()?;
+    m.add_class::<PyConditionalFormatting>()?;
 
     Ok(())
 }
@@ -693,6 +696,18 @@ impl PyWorksheet {
         }
     }
 
+    /// Conditional-formatting proxy, mirroring openpyxl's
+    /// `ws.conditional_formatting`. The returned object exposes
+    /// `.add(range_string, rule)` which registers a [`PyFormulaRule`] or
+    /// [`PyCellIsRule`] against the worksheet.
+    #[getter]
+    fn conditional_formatting(&self) -> PyConditionalFormatting {
+        PyConditionalFormatting {
+            workbook: Arc::clone(&self.workbook),
+            sheet_index: self.sheet_index,
+        }
+    }
+
     /// Add an Excel table, mirroring openpyxl's `ws.add_table`.
     ///
     /// Raises `ValueError` if a table with the same `displayName` (case-insensitive)
@@ -850,6 +865,146 @@ impl PyAutoFilter {
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
         sheet.set_auto_filter(value.as_deref());
         Ok(())
+    }
+}
+
+/// openpyxl-parity `openpyxl.formatting.rule.FormulaRule`.
+///
+/// Mirrors `FormulaRule(formula=[...], stopIfTrue=False, font=None, fill=None)`:
+/// a `cfRule type="expression"` that applies the differential `fill`/`font` when
+/// the single `formula` expression evaluates truthy.
+///
+/// `border` (an openpyxl `FormulaRule` kwarg) is not modeled, and `font` is
+/// accepted for forward parity but cannot be built from Python today (the `Font`
+/// binding has no constructor), so in practice only `fill` is populated.
+#[pyclass(name = "FormulaRule")]
+#[derive(Clone)]
+struct PyFormulaRule {
+    formulas: Vec<String>,
+    stop_if_true: bool,
+    dxf: Dxf,
+}
+
+#[pymethods]
+impl PyFormulaRule {
+    #[new]
+    #[pyo3(signature = (formula = None, stopIfTrue = false, font = None, fill = None))]
+    #[allow(non_snake_case)]
+    fn new(
+        formula: Option<Vec<String>>,
+        stopIfTrue: bool,
+        font: Option<PyFont>,
+        fill: Option<PyPatternFill>,
+    ) -> Self {
+        Self {
+            formulas: formula.unwrap_or_default(),
+            stop_if_true: stopIfTrue,
+            dxf: dxf_from(font, fill),
+        }
+    }
+}
+
+impl PyFormulaRule {
+    fn to_rule(&self) -> ConditionalRule {
+        ConditionalRule::formula(self.formulas.clone(), self.dxf.clone())
+            .with_stop_if_true(self.stop_if_true)
+    }
+}
+
+/// openpyxl-parity `openpyxl.formatting.rule.CellIsRule`.
+///
+/// Mirrors `CellIsRule(operator=..., formula=[...], stopIfTrue=False, font=None,
+/// fill=None)`: a `cfRule type="cellIs"` carrying a comparison `operator` (e.g.
+/// `"greaterThan"`) and its operand formula(s). See [`PyFormulaRule`] for the
+/// `font`/`border` parity notes.
+#[pyclass(name = "CellIsRule")]
+#[derive(Clone)]
+struct PyCellIsRule {
+    operator: String,
+    formulas: Vec<String>,
+    stop_if_true: bool,
+    dxf: Dxf,
+}
+
+#[pymethods]
+impl PyCellIsRule {
+    #[new]
+    #[pyo3(signature = (operator = None, formula = None, stopIfTrue = false, font = None, fill = None))]
+    #[allow(non_snake_case)]
+    fn new(
+        operator: Option<String>,
+        formula: Option<Vec<String>>,
+        stopIfTrue: bool,
+        font: Option<PyFont>,
+        fill: Option<PyPatternFill>,
+    ) -> Self {
+        Self {
+            operator: operator.unwrap_or_default(),
+            formulas: formula.unwrap_or_default(),
+            stop_if_true: stopIfTrue,
+            dxf: dxf_from(font, fill),
+        }
+    }
+}
+
+impl PyCellIsRule {
+    fn to_rule(&self) -> ConditionalRule {
+        ConditionalRule::cell_is(&self.operator, self.formulas.clone(), self.dxf.clone())
+            .with_stop_if_true(self.stop_if_true)
+    }
+}
+
+/// Build a [`Dxf`] differential format from optional Python `font`/`fill`
+/// rule arguments.
+fn dxf_from(font: Option<PyFont>, fill: Option<PyPatternFill>) -> Dxf {
+    Dxf {
+        font: font.map(|f| f.inner),
+        fill: fill.map(|f| f.inner),
+    }
+}
+
+/// Conditional-formatting proxy, mirroring openpyxl's
+/// `ws.conditional_formatting`. Backed live by the owning workbook; `.add`
+/// registers a rule against the worksheet.
+#[pyclass(name = "ConditionalFormatting")]
+struct PyConditionalFormatting {
+    workbook: Arc<Mutex<Workbook>>,
+    sheet_index: usize,
+}
+
+impl PyConditionalFormatting {
+    fn lock(&self) -> PyResult<MutexGuard<'_, Workbook>> {
+        self.workbook
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Workbook lock poisoned"))
+    }
+}
+
+#[pymethods]
+impl PyConditionalFormatting {
+    /// Register `rule` against `sqref`, mirroring openpyxl's
+    /// `ws.conditional_formatting.add(range_string, rule)`. Accepts a
+    /// [`PyFormulaRule`] or [`PyCellIsRule`]; any other object raises
+    /// `TypeError`. Propagates [`OxlsxError`] (e.g. an invalid range) as a
+    /// Python exception via [`map_oxlsx_error`].
+    fn add(&self, sqref: &str, rule: &Bound<'_, PyAny>) -> PyResult<()> {
+        let conditional_rule = if let Ok(formula_rule) = rule.extract::<PyFormulaRule>() {
+            formula_rule.to_rule()
+        } else if let Ok(cell_is_rule) = rule.extract::<PyCellIsRule>() {
+            cell_is_rule.to_rule()
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "rule must be a FormulaRule or CellIsRule",
+            ));
+        };
+
+        let mut workbook = self.lock()?;
+        let sheet = workbook
+            .sheet_mut(self.sheet_index)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Worksheet not found"))?;
+        sheet
+            .add_conditional_formatting(sqref, conditional_rule)
+            .map_err(map_oxlsx_error)
     }
 }
 
@@ -1297,6 +1452,7 @@ impl PyTableNamesIter {
 }
 
 #[pyclass(name = "Font")]
+#[derive(Clone)]
 struct PyFont {
     inner: Font,
 }
