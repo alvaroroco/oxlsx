@@ -2,7 +2,7 @@
 
 ## 1. Goal
 
-Create a high-performance, memory-efficient Rust library to read and write `.xlsx` files with full formatting support, designed as an **openpyxl equivalent in Rust** with Python bindings (PyO3) planned.
+Create a high-performance, memory-efficient Rust library to read and write `.xlsx` files with full formatting support, designed as an **openpyxl equivalent in Rust** with Python bindings (PyO3).
 
 The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as closely as the language allows.
 
@@ -26,8 +26,15 @@ The #1 priority is **API ergonomics**: the Rust API must mirror openpyxl as clos
 ### Workbook / Worksheet / Cell
 - `Workbook`: Main entry point — open existing or create new
 - `Worksheet`: Access and set cells by Excel-style reference (`"A1"`, `"B3"`)
-- `Cell`: Contains `Value`, `StyleId`, and `Arc<StyleSheet>`
+- `Cell`: Contains `Value`, `StyleId`, `Arc<StyleSheet>`, and optional `Comment` / `Hyperlink`
 - `Value`: `Empty | String(String) | Number(f64) | Bool(bool) | Date(NaiveDate) | Formula(String)`
+
+### Sheet & workbook features
+- `DefinedName` / `DefinedNames`: named ranges — global (`wb.defined_names()`) and sheet-local (`ws.defined_names()`)
+- `Table` / `TableColumn` / `TableStyleInfo`: worksheet tables with lossless RMW
+- `Comment`, `Hyperlink`: cell-attached, ride along with the `Cell`
+- `Dxf`: differential format (fill/font) for conditional formatting; `ConditionalFormatting` holds `FormulaRule` / `CellIsRule` per `sqref`
+- Sheet-level: freeze panes, print settings (`_xlnm.*`), `auto_filter`
 
 ## 4. Phase Scope
 
@@ -126,11 +133,25 @@ Complete the formatting surface to match openpyxl:
 3. Named ranges — `wb.defined_names()` (global) + `ws.defined_names()` (sheet-local), conservative lossless passthrough; reserved-name rejection
 4. Tables — `ws.add_table(Table)`, `ws.tables`, `ws.remove_table()`, `TableStyleInfo`; **lossless RMW** (unmodeled table features preserved verbatim when the table is not mutated)
 
-### 🔲 Phase 14 — PyPI Publish + CI/CD
-1. `maturin publish` workflow for PyPI releases
-2. GitHub Actions: build wheels for Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows
-3. Version management — `Cargo.toml` + `pyproject.toml` in sync
-4. `crates.io` publish for the Rust library
+### ✅ Phase 14 — Distribution: PyPI + crates.io + CI
+1. `maturin` abi3 wheels (single `cp38-abi3` per platform; Linux x86_64/aarch64, macOS x86_64/aarch64, Windows) + sdist
+2. PyPI publish via OIDC **Trusted Publishing** (no stored tokens; `pypi`/`testpypi` environments)
+3. `crates.io` publish (`cargo publish`, `CARGO_REGISTRY_TOKEN`)
+4. Release workflow on GitHub Release published (+ `workflow_dispatch` TestPyPI dry-run); `Cargo.toml` / `pyproject.toml` version sync
+5. Shipped as **v0.1.1** to both registries
+
+### ✅ Post-v0.1.0 — openpyxl migration parity
+Gaps surfaced by a real openpyxl→oxlsx migration, all delivered with strict TDD + cross-engine parity:
+1. **Bulk write** (the real Phase 10) — `append` (list/dict), `insert_rows`/`insert_cols`, `delete_rows`/`delete_cols`, `move_range`; sparse shift engine, merges/dims shift, table-intersection guard, formulas verbatim, Excel grid-bound + overflow validation
+2. **Conditional formatting** — `FormulaRule`, `CellIsRule` + `Dxf` (gated `<dxfs>`; no-CF files byte-identical); RMW preserves source dxfs + unmodeled rules (color scales) verbatim
+3. **Sheet `auto_filter`** — `ws.auto_filter.ref`
+4. **`PatternFill`** + `ws.set_cell_fill`
+5. **Utils** — `get_column_letter`, `column_index_from_string`, `dataframe_to_rows` (pandas, duck-typed, no hard dep)
+
+### 🔲 Phase 15 — Pandas engine / tabular adapter
+1. `engine="oxlsx"` integration via a dedicated adapter
+2. DataFrame ↔ XLSX mapping, headers/index handling, type conversions
+3. Explicit adapter instead of monkeypatching by default
 
 ## 5. Performance Targets
 
