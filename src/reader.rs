@@ -427,6 +427,106 @@ impl Worksheet {
         Ok(())
     }
 
+    /// Append a row of values at the bottom of the sheet, mirroring openpyxl's
+    /// `ws.append(iterable)`.
+    ///
+    /// Values are written into a fresh row (`max_row + 1`, or row 1 when the
+    /// sheet is empty), positionally from column A and contiguous. The Rust core
+    /// is purely positional; sparse/dict shapes are handled by the Python layer.
+    pub fn append(&mut self, values: impl IntoIterator<Item = Value>) {
+        let target_row = self
+            .used_bounds()
+            .map_or(1, |(_, _, _, max_row)| max_row + 1);
+        for (offset, value) in values.into_iter().enumerate() {
+            let col = offset as u32 + 1;
+            let reference = rc_to_a1(target_row, col);
+            self.ensure_cell_mut(&reference).value = value;
+        }
+    }
+
+    /// Move the block of cells in `cell_range` by (`rows`, `cols`), mirroring
+    /// openpyxl's `ws.move_range(cell_range, rows, cols, translate)`.
+    ///
+    /// The source cells are cleared and rewritten at the offset; destination
+    /// cells are overwritten (openpyxl semantics). Formula text moves verbatim.
+    /// Negative offsets are allowed.
+    ///
+    /// Returns:
+    /// - [`OxlsxError::UnsupportedTranslate`] when `translate` is `true`
+    ///   (formula translation is out of scope) — worksheet unchanged.
+    /// - [`OxlsxError::InvalidFormat`] when `cell_range` does not parse, or the
+    ///   move would push any cell to row/column `< 1` — worksheet unchanged.
+    /// - [`OxlsxError::TableIntersection`] when the source OR destination band
+    ///   overlaps a table range — worksheet unchanged.
+    pub fn move_range(
+        &mut self,
+        cell_range: &str,
+        rows: i64,
+        cols: i64,
+        translate: bool,
+    ) -> Result<(), OxlsxError> {
+        if translate {
+            return Err(OxlsxError::UnsupportedTranslate);
+        }
+
+        let Some(((start_col, start_row), (end_col, end_row))) = parse_range(cell_range) else {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "move_range cell_range {cell_range:?} is not a valid A1 range"
+            )));
+        };
+
+        // Normalize endpoints so the rectangle is well-formed regardless of the
+        // order the caller passed them in.
+        let (min_col, max_col) = (start_col.min(end_col), start_col.max(end_col));
+        let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+
+        // Compute the destination band; reject moves that fall off the grid.
+        let dest_min_col = i64::from(min_col) + cols;
+        let dest_min_row = i64::from(min_row) + rows;
+        let dest_max_col = i64::from(max_col) + cols;
+        let dest_max_row = i64::from(max_row) + rows;
+        if dest_min_col < 1 || dest_min_row < 1 {
+            return Err(OxlsxError::InvalidFormat(format!(
+                "move_range would push cells out of bounds (row/col < 1) for {cell_range:?}"
+            )));
+        }
+
+        // Guard the source AND destination bands against table intersection
+        // before any mutation, so a rejected move leaves the worksheet unchanged.
+        self.guard_tables_rect(min_col, max_col, min_row, max_row)?;
+        self.guard_tables_rect(
+            dest_min_col as u32,
+            dest_max_col as u32,
+            dest_min_row as u32,
+            dest_max_row as u32,
+        )?;
+
+        // Collect (and remove) every source cell, re-keying it to the offset.
+        let width = (max_col - min_col + 1) as usize;
+        let height = (max_row - min_row + 1) as usize;
+        let mut moved = Vec::with_capacity(width * height);
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let src_ref = rc_to_a1(row, col);
+                if let Some(mut cell) = self.cells.remove(&src_ref) {
+                    let new_ref = rc_to_a1(
+                        (i64::from(row) + rows) as u32,
+                        (i64::from(col) + cols) as u32,
+                    );
+                    cell.reference = new_ref.clone();
+                    moved.push((new_ref, cell));
+                }
+            }
+        }
+
+        // Write at the destination, overwriting any existing cells there.
+        for (reference, cell) in moved {
+            self.cells.insert(reference, cell);
+        }
+
+        Ok(())
+    }
+
     /// Reject a row/column shift whose affected band `[idx, u32::MAX]` overlaps
     /// any table range. Computed before any mutation so a rejected op leaves the
     /// worksheet untouched.
@@ -441,6 +541,30 @@ impl Worksheet {
                 Axis::Col => (start_col, end_col),
             };
             if bands_intersect(idx, u32::MAX, span_start, span_end) {
+                return Err(OxlsxError::TableIntersection(table.ref_range.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a 2-D rectangular band `[min_col, max_col] x [min_row, max_row]`
+    /// that overlaps any table range. Used by [`move_range`](Self::move_range)
+    /// to guard both the source and destination blocks before any mutation.
+    fn guard_tables_rect(
+        &self,
+        min_col: u32,
+        max_col: u32,
+        min_row: u32,
+        max_row: u32,
+    ) -> Result<(), OxlsxError> {
+        for table in &self.tables {
+            let Some(((start_col, start_row), (end_col, end_row))) = parse_range(&table.ref_range)
+            else {
+                continue;
+            };
+            if bands_intersect(min_col, max_col, start_col, end_col)
+                && bands_intersect(min_row, max_row, start_row, end_row)
+            {
                 return Err(OxlsxError::TableIntersection(table.ref_range.clone()));
             }
         }
@@ -2250,5 +2374,109 @@ mod tests {
             ws.cell("B2").unwrap().value(),
             &Value::Formula("=A3+1".to_string())
         );
+    }
+
+    // ---- Bulk-write append + move_range (Slice 2) ----
+
+    #[test]
+    fn append_adds_row_at_bottom() {
+        // Empty sheet: append lands at row 1, starting at column A, contiguous.
+        let mut ws = Worksheet::new("S");
+        ws.append([s("a"), s("b"), s("c")]);
+        assert_eq!(ws.max_row(), 1);
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a"));
+        assert_eq!(ws.cell("B1").unwrap().value(), &s("b"));
+        assert_eq!(ws.cell("C1").unwrap().value(), &s("c"));
+
+        // Append after existing rows lands at max_row + 1.
+        ws.set_cell("A3", "existing");
+        ws.append([Value::Number(1.0), Value::Number(2.0)]);
+        assert_eq!(ws.cell("A4").unwrap().value(), &Value::Number(1.0));
+        assert_eq!(ws.cell("B4").unwrap().value(), &Value::Number(2.0));
+        // Pre-existing rows untouched.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a"));
+        assert_eq!(ws.cell("A3").unwrap().value(), &s("existing"));
+        assert_eq!(ws.max_row(), 4);
+    }
+
+    #[test]
+    fn move_range_relocates_block() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+        ws.set_cell("B1", "b1");
+        ws.set_cell("A2", Value::Formula("=A1+1".to_string()));
+        // Destination cell that must be overwritten by the move.
+        ws.set_cell("C3", "victim");
+
+        // Move A1:B2 down 2 rows, right 2 cols (translate=false).
+        ws.move_range("A1:B2", 2, 2, false).unwrap();
+
+        // Source cells cleared.
+        assert!(ws.cell("A1").is_none());
+        assert!(ws.cell("B1").is_none());
+        assert!(ws.cell("A2").is_none());
+
+        // Destination has the relocated cells.
+        assert_eq!(ws.cell("C3").unwrap().value(), &s("a1"));
+        assert_eq!(ws.cell("D3").unwrap().value(), &s("b1"));
+        // Formula text rides verbatim (no translation).
+        assert_eq!(
+            ws.cell("C4").unwrap().value(),
+            &Value::Formula("=A1+1".to_string())
+        );
+        // Destination overwrite verified: C3 was "victim", now "a1".
+    }
+
+    #[test]
+    fn move_range_translate_true_is_unsupported() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+
+        let err = ws.move_range("A1:B2", 1, 1, true).unwrap_err();
+        assert!(matches!(err, OxlsxError::UnsupportedTranslate));
+        // Worksheet unchanged on rejection.
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
+    }
+
+    #[test]
+    fn move_range_intersecting_table_returns_err() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "H1");
+        ws.set_cell("B1", "H2");
+        ws.set_cell("C1", "H3");
+        ws.add_table(crate::Table::new("T", "A1:C3")).unwrap();
+        let cells_before = ws.cells().len();
+
+        // Source band intersects the table -> Err, worksheet unchanged.
+        let err = ws.move_range("A1:B2", 10, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+        assert_eq!(ws.cells().len(), cells_before);
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("H1"));
+
+        // Destination band intersects the table -> Err, worksheet unchanged.
+        ws.set_cell("F10", "src");
+        let cells_before = ws.cells().len();
+        let err = ws.move_range("F10", -9, -3, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::TableIntersection(_)));
+        assert_eq!(ws.cells().len(), cells_before);
+        assert_eq!(ws.cell("F10").unwrap().value(), &s("src"));
+    }
+
+    #[test]
+    fn move_range_out_of_bounds_returns_err() {
+        let mut ws = Worksheet::new("S");
+        ws.set_cell("A1", "a1");
+        ws.set_cell("B2", "b2");
+
+        // Moving up would push row 1 to row 0 (< 1) -> Err, unchanged.
+        let err = ws.move_range("A1:B2", -1, 0, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
+        assert_eq!(ws.cell("B2").unwrap().value(), &s("b2"));
+
+        // Moving left would push col A to col 0 (< 1) -> Err, unchanged.
+        let err = ws.move_range("A1:B2", 0, -1, false).unwrap_err();
+        assert!(matches!(err, OxlsxError::InvalidFormat(_)));
+        assert_eq!(ws.cell("A1").unwrap().value(), &s("a1"));
     }
 }

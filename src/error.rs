@@ -14,6 +14,8 @@ pub enum OxlsxError {
     DuplicateTableName(String),
     #[error("operation intersects table range: {0}")]
     TableIntersection(String),
+    #[error("move_range with translate=true is not supported: formula translation is out of scope")]
+    UnsupportedTranslate,
 }
 
 #[cfg(test)]
@@ -36,5 +38,14 @@ mod tests {
     fn renders_table_intersection_message() {
         let err = OxlsxError::TableIntersection("A1:C3".to_string());
         assert_eq!(err.to_string(), "operation intersects table range: A1:C3");
+    }
+
+    #[test]
+    fn renders_unsupported_translate_message() {
+        let err = OxlsxError::UnsupportedTranslate;
+        assert_eq!(
+            err.to_string(),
+            "move_range with translate=true is not supported: formula translation is out of scope"
+        );
     }
 }
