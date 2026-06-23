@@ -1265,6 +1265,14 @@ fn write_sheet_xml(
 
     write_end(&mut xml, "sheetData")?;
 
+    // Sheet-level `<autoFilter>` MUST follow `</sheetData>` and precede
+    // `<mergeCells>` per CT_Worksheet child ordering, or Excel flags the file
+    // for repair. This is the worksheet-scoped filter, independent of any
+    // table's own `<autoFilter>` (which lives in `tableN.xml`).
+    if let Some(range_ref) = ws.auto_filter() {
+        write_empty(&mut xml, "autoFilter", &[("ref", range_ref)])?;
+    }
+
     if !ws.merged_cells.is_empty() {
         let count = ws.merged_cells.len().to_string();
         write_start(&mut xml, "mergeCells", &[("count", count.as_str())])?;

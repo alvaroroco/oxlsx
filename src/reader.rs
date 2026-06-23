@@ -164,6 +164,11 @@ pub struct Worksheet {
     /// Kept in lock-step with `tables` by every mutation (`add_table`,
     /// `remove_table`).
     pub(crate) table_retention: Vec<Option<RawTable>>,
+    /// Sheet-level `<autoFilter ref="...">` range (e.g. `"A1:D10"`), if any.
+    ///
+    /// This is the worksheet-scoped filter (openpyxl's `ws.auto_filter.ref`),
+    /// distinct from a table's own `<autoFilter>` which lives in `tableN.xml`.
+    pub(crate) auto_filter: Option<String>,
 }
 
 impl Worksheet {
@@ -181,6 +186,7 @@ impl Worksheet {
             defined_names: crate::DefinedNames::default(),
             tables: Vec::new(),
             table_retention: Vec::new(),
+            auto_filter: None,
         }
     }
 
@@ -640,6 +646,23 @@ impl Worksheet {
 
     pub fn set_freeze_panes(&mut self, value: Option<&str>) {
         self.freeze_panes = normalize_freeze_panes(value);
+    }
+
+    /// The sheet-level autofilter range (openpyxl's `ws.auto_filter.ref`), if
+    /// set — e.g. `Some("A1:D10")`. Distinct from a table's own filter, which
+    /// lives in the table part rather than the worksheet XML.
+    pub fn auto_filter(&self) -> Option<&str> {
+        self.auto_filter.as_deref()
+    }
+
+    /// Set or clear the sheet-level autofilter range, mirroring assignment to
+    /// openpyxl's `ws.auto_filter.ref`. `None` (or an empty/whitespace-only
+    /// string) clears it; otherwise the trimmed value is stored verbatim.
+    pub fn set_auto_filter(&mut self, value: Option<&str>) {
+        self.auto_filter = value
+            .map(str::trim)
+            .filter(|range| !range.is_empty())
+            .map(ToString::to_string);
     }
 
     pub fn print_area(&self) -> Option<String> {
@@ -1210,6 +1233,7 @@ fn parse_sheet<R: BufRead>(
     let mut freeze_panes = None;
     let mut in_sheet_view = false;
     let mut raw_hyperlinks = Vec::new();
+    let mut auto_filter = None;
 
     loop {
         match xml.read_event_into(&mut buf)? {
@@ -1225,6 +1249,13 @@ fn parse_sheet<R: BufRead>(
             Event::Start(e) if e.local_name().as_ref() == b"mergeCell" => {
                 if let Some(range_ref) = attr_value(&e, b"ref")? {
                     merged_cells.push(range_ref);
+                }
+            }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"autoFilter" => {
+                // Sheet-level `<autoFilter ref="...">`. A table's own autoFilter
+                // lives in `tableN.xml`, not here, so this is unambiguous.
+                if let Some(range_ref) = attr_value(&e, b"ref")? {
+                    auto_filter = Some(range_ref);
                 }
             }
             Event::Start(e) if e.local_name().as_ref() == b"sheetView" => {
@@ -1332,6 +1363,7 @@ fn parse_sheet<R: BufRead>(
             defined_names: crate::DefinedNames::default(),
             tables: Vec::new(),
             table_retention: Vec::new(),
+            auto_filter,
         },
         raw_hyperlinks,
     ))
@@ -2001,6 +2033,7 @@ mod tests {
                     defined_names: crate::DefinedNames::default(),
                     tables: Vec::new(),
                     table_retention: Vec::new(),
+                    auto_filter: None,
                 },
                 Worksheet {
                     name: "Productos".to_string(),
@@ -2015,6 +2048,7 @@ mod tests {
                     defined_names: crate::DefinedNames::default(),
                     tables: Vec::new(),
                     table_retention: Vec::new(),
+                    auto_filter: None,
                 },
             ],
             active_index: 1,

@@ -2649,3 +2649,71 @@ fn internal_location_hyperlink_preserved_on_rmw() {
 
     fs::remove_file(path).ok();
 }
+
+/// Sheet-level `<autoFilter>` survives a write/reopen round trip, and the
+/// element is emitted after `</sheetData>` and before `<mergeCells>` when both
+/// are present (CT_Worksheet child ordering).
+#[test]
+fn auto_filter_round_trip_write() {
+    let path = temp_path("oxlsx_auto_filter_write.xlsx");
+
+    let mut wb = Workbook::new();
+    {
+        let ws = wb.active_mut().unwrap();
+        ws.set_cell("A1", "h");
+        ws.merge_cells("A5:C5");
+        ws.set_auto_filter(Some("A1:C5"));
+    }
+    wb.save(&path).unwrap();
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(wb2.active().unwrap().auto_filter(), Some("A1:C5"));
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains("<autoFilter ref=\"A1:C5\""),
+        "autoFilter element present: {sheet_xml}"
+    );
+
+    let filter_pos = sheet_xml.find("<autoFilter").expect("autoFilter present");
+    let merge_pos = sheet_xml.find("<mergeCells").expect("mergeCells present");
+    let data_end = sheet_xml.find("</sheetData>").expect("sheetData present");
+    assert!(
+        data_end < filter_pos && filter_pos < merge_pos,
+        "autoFilter must sit after </sheetData> and before <mergeCells>: {sheet_xml}"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+/// A sheet-level autofilter authored by openpyxl is read into `auto_filter`.
+#[test]
+fn auto_filter_read_from_existing() {
+    let wb = Workbook::open("samples/autofilter.xlsx").unwrap();
+    assert_eq!(wb.active().unwrap().auto_filter(), Some("A1:C3"));
+}
+
+/// Editing an unrelated cell preserves the sheet-level autofilter across RMW.
+#[test]
+fn auto_filter_rmw_preserves() {
+    let path = temp_path("oxlsx_auto_filter_rmw.xlsx");
+    fs::copy("samples/autofilter.xlsx", &path).unwrap();
+
+    {
+        let mut wb = Workbook::open(&path).unwrap();
+        assert_eq!(wb.active().unwrap().auto_filter(), Some("A1:C3"));
+        wb.active_mut().unwrap().set_cell("E10", "unrelated");
+        wb.save(&path).unwrap();
+    }
+
+    let wb2 = Workbook::open(&path).unwrap();
+    assert_eq!(wb2.active().unwrap().auto_filter(), Some("A1:C3"));
+
+    let sheet_xml = read_zip_entry(&path, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet_xml.contains("<autoFilter ref=\"A1:C3\""),
+        "autoFilter preserved on RMW: {sheet_xml}"
+    );
+
+    fs::remove_file(path).ok();
+}
