@@ -1144,3 +1144,93 @@ def test_hyperlink_round_trip(new_wb, load_wb):
         assert link.target == target
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# openpyxl-parity Group 1 — column utilities + PatternFill
+#
+# Column utilities mirror openpyxl.utils.get_column_letter /
+# column_index_from_string (1-based). PatternFill mirrors
+# openpyxl.styles.PatternFill; because oxlsx's PyCell is a value snapshot, the
+# write path is a worksheet method (`ws.set_cell_fill`), mirroring
+# `ws.set_cell_comment` / `ws.set_cell_hyperlink`.
+# ---------------------------------------------------------------------------
+
+
+def test_get_column_letter():
+    from openpyxl.utils import get_column_letter as openpyxl_get_column_letter
+
+    # Anchor values from the parity spec.
+    assert oxlsx.get_column_letter(1) == "A"
+    assert oxlsx.get_column_letter(26) == "Z"
+    assert oxlsx.get_column_letter(27) == "AA"
+    assert oxlsx.get_column_letter(702) == "ZZ"
+    assert oxlsx.get_column_letter(703) == "AAA"
+
+    # Cross-check against openpyxl over a range.
+    for idx in range(1, 1000):
+        assert oxlsx.get_column_letter(idx) == openpyxl_get_column_letter(idx)
+
+    # openpyxl raises for indices < 1; oxlsx mirrors with ValueError.
+    with pytest.raises(ValueError):
+        oxlsx.get_column_letter(0)
+
+
+def test_column_index_from_string():
+    from openpyxl.utils import column_index_from_string as openpyxl_column_index
+
+    assert oxlsx.column_index_from_string("A") == 1
+    assert oxlsx.column_index_from_string("Z") == 26
+    assert oxlsx.column_index_from_string("AA") == 27
+    assert oxlsx.column_index_from_string("ZZ") == 702
+    assert oxlsx.column_index_from_string("AAA") == 703
+
+    # Cross-check the inverse against openpyxl over a range.
+    for idx in range(1, 1000):
+        letters = oxlsx.get_column_letter(idx)
+        assert oxlsx.column_index_from_string(letters) == idx
+        assert oxlsx.column_index_from_string(letters) == openpyxl_column_index(letters)
+
+    # Invalid (non-alphabetic / mixed) input raises ValueError.
+    with pytest.raises(ValueError):
+        oxlsx.column_index_from_string("A1")
+
+
+def test_pattern_fill_round_trip():
+    from openpyxl.styles import PatternFill as OpenpyxlPatternFill
+
+    # Alias parity: start_color → fgColor, fill_type → patternType.
+    fill = oxlsx.PatternFill(fill_type="solid", start_color="FFFF0000")
+    assert fill.fill_type == "solid"
+    assert fill.patternType == "solid"
+    assert fill.fgColor.rgb == "FFFF0000"
+
+    # Sanity: openpyxl resolves the same shape from the same kwargs.
+    ref = OpenpyxlPatternFill(fill_type="solid", start_color="FFFF0000")
+    assert ref.fill_type == "solid"
+    assert ref.fgColor.rgb == "FFFF0000"
+
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    ws["A1"] = "Filled"
+    ws.set_cell_fill("A1", oxlsx.PatternFill(fill_type="solid", fgColor="FFFF0000"))
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        wb.save(path)
+
+        # oxlsx reads back the fill it wrote.
+        wb2 = oxlsx.load_workbook(path)
+        fill2 = wb2.active["A1"].fill
+        assert fill2 is not None
+        assert fill2.fg_color.rgb == "FFFF0000"
+
+        # Cross-check: openpyxl reads the same solid fill + color.
+        wb3 = openpyxl.load_workbook(path)
+        fill3 = wb3.active["A1"].fill
+        assert fill3.fill_type == "solid"
+        assert fill3.fgColor.rgb == "FFFF0000"
+    finally:
+        os.unlink(path)
+

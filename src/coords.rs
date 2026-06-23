@@ -31,6 +31,41 @@ pub(crate) fn column_name(mut index: u32) -> String {
     chars.iter().rev().collect()
 }
 
+/// openpyxl `get_column_letter`: 1-based column index -> column letters
+/// (`1 -> "A"`, `26 -> "Z"`, `27 -> "AA"`, `702 -> "ZZ"`, `703 -> "AAA"`).
+///
+/// Returns `None` for index `0`; openpyxl raises `ValueError` for indices `< 1`.
+/// This is a thin 1-based adapter over [`column_name`] (already 1-based) that
+/// adds the openpyxl lower-bound validation without changing crate semantics.
+#[cfg_attr(
+    not(any(feature = "python", feature = "extension-module")),
+    allow(dead_code)
+)]
+pub(crate) fn column_letter_from_index(index: u32) -> Option<String> {
+    if index == 0 {
+        return None;
+    }
+    Some(column_name(index))
+}
+
+/// openpyxl `column_index_from_string`: column letters -> 1-based index
+/// (`"A" -> 1`, `"AA" -> 27`).
+///
+/// Strict adapter over [`column_index`]: every byte must be ASCII alphabetic
+/// and the input must be non-empty, otherwise `None` is returned. Unlike
+/// [`column_index`] (which stops at the first non-letter of a full `A1`
+/// reference), this rejects mixed input like `"A1"` to match openpyxl.
+#[cfg_attr(
+    not(any(feature = "python", feature = "extension-module")),
+    allow(dead_code)
+)]
+pub(crate) fn column_index_from_letters(letters: &str) -> Option<u32> {
+    if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    column_index(letters)
+}
+
 pub(crate) fn rc_to_a1(row: u32, col: u32) -> String {
     assert!(row >= 1, "row must be 1-based");
     assert!(col >= 1, "col must be 1-based");
@@ -149,5 +184,30 @@ mod tests {
         assert_eq!(super::make_absolute_line_range("1:3"), "$1:$3");
         assert_eq!(super::make_absolute_line_range("A:C"), "$A:$C");
         assert_eq!(super::make_absolute_line_range("$1:$3"), "$1:$3");
+    }
+
+    #[test]
+    fn column_letter_from_index_is_one_based_openpyxl_parity() {
+        assert_eq!(super::column_letter_from_index(1).as_deref(), Some("A"));
+        assert_eq!(super::column_letter_from_index(26).as_deref(), Some("Z"));
+        assert_eq!(super::column_letter_from_index(27).as_deref(), Some("AA"));
+        assert_eq!(super::column_letter_from_index(702).as_deref(), Some("ZZ"));
+        assert_eq!(super::column_letter_from_index(703).as_deref(), Some("AAA"));
+        // openpyxl raises ValueError for indices < 1.
+        assert_eq!(super::column_letter_from_index(0), None);
+    }
+
+    #[test]
+    fn column_index_from_letters_is_inverse_and_strict() {
+        assert_eq!(super::column_index_from_letters("A"), Some(1));
+        assert_eq!(super::column_index_from_letters("Z"), Some(26));
+        assert_eq!(super::column_index_from_letters("AA"), Some(27));
+        assert_eq!(super::column_index_from_letters("ZZ"), Some(702));
+        assert_eq!(super::column_index_from_letters("AAA"), Some(703));
+        // Lowercase is accepted (openpyxl upcases internally).
+        assert_eq!(super::column_index_from_letters("aa"), Some(27));
+        // Strict: mixed / empty input is rejected (unlike `column_index`).
+        assert_eq!(super::column_index_from_letters("A1"), None);
+        assert_eq!(super::column_index_from_letters(""), None);
     }
 }
