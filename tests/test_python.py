@@ -1609,3 +1609,26 @@ def test_append_dict_rejects_huge_column_key_integer():
 
     assert ws["A1"].value is None
 
+
+# ---- C5: cell(row=0, column=0) must raise ValueError not panic ----
+
+
+def test_cell_zero_index_raises_valueerror():
+    """ws.cell(row=0) or ws.cell(column=0) raises ValueError (openpyxl parity), no crash."""
+    wb = oxlsx.Workbook()
+    ws = wb.active
+    ws["A1"] = "valid"
+
+    # openpyxl raises ValueError for row < 1 or column < 1.
+    with pytest.raises(ValueError, match="row|column"):
+        ws.cell(row=0, column=1)
+
+    with pytest.raises(ValueError, match="row|column"):
+        ws.cell(row=1, column=0)
+
+    with pytest.raises(ValueError, match="row|column"):
+        ws.cell(row=0, column=0)
+
+    # Valid 1-based access still works.
+    assert ws.cell(row=1, column=1).value == "valid"
+

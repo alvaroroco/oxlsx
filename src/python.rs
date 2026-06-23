@@ -491,6 +491,18 @@ impl PyWorksheet {
 
     #[pyo3(signature = (*, row, column))]
     fn cell(&self, row: u32, column: u32) -> PyResult<PyCell> {
+        // openpyxl raises ValueError for row < 1 or column < 1; validate BEFORE
+        // calling rc_to_a1 (which has an assert and would panic).
+        if row < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "row must be >= 1, got {row}"
+            )));
+        }
+        if column < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "column must be >= 1, got {column}"
+            )));
+        }
         let coord = rc_to_a1(row, column);
         self.cell_from_coord(&coord)
     }
