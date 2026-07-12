@@ -77,12 +77,13 @@ pub(crate) mod native_writer {
                 }
                 NativeWriterState::Open => {}
             }
+            self.state = NativeWriterState::Failed;
             match edit(&mut self.workbook) {
-                Ok(value) => Ok(value),
-                Err(error) => {
-                    self.state = NativeWriterState::Failed;
-                    Err(error)
+                Ok(value) => {
+                    self.state = NativeWriterState::Open;
+                    Ok(value)
                 }
+                Err(error) => Err(error),
             }
         }
 
@@ -95,13 +96,14 @@ pub(crate) mod native_writer {
         }
 
         pub fn save(&mut self, path: &Path) -> Result<(), OxlsxError> {
+            let destination = absolute_destination(path)?;
             match &self.state {
-                NativeWriterState::Saved(destination) if destination == path => {
+                NativeWriterState::Saved(saved) if saved == &destination => {
                     return Ok(());
                 }
-                NativeWriterState::Saved(destination) => {
+                NativeWriterState::Saved(saved) => {
                     return Err(OxlsxError::WriterAlreadySaved {
-                        destination: destination.clone(),
+                        destination: saved.clone(),
                     });
                 }
                 NativeWriterState::Failed => return Err(OxlsxError::WriterFailed),
@@ -109,7 +111,7 @@ pub(crate) mod native_writer {
             }
             match write_xlsx(&self.workbook, path, self.workbook.source_path.as_deref()) {
                 Ok(()) => {
-                    self.state = NativeWriterState::Saved(path.to_path_buf());
+                    self.state = NativeWriterState::Saved(destination);
                     Ok(())
                 }
                 Err(error) => {
@@ -117,6 +119,14 @@ pub(crate) mod native_writer {
                     Err(error)
                 }
             }
+        }
+    }
+
+    fn absolute_destination(path: &Path) -> Result<std::path::PathBuf, OxlsxError> {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            Ok(std::env::current_dir()?.join(path))
         }
     }
 }
@@ -143,7 +153,7 @@ pub(crate) fn collect_styles(
     sheets: &[Worksheet],
     original: Option<&StyleSheet>,
     preserve_original: bool,
-) -> CollectedStyles {
+) -> Result<CollectedStyles, OxlsxError> {
     let styled_cells = sheets
         .iter()
         .map(|sheet| sheet.cells().len())
@@ -256,7 +266,7 @@ pub(crate) fn collect_styles(
                 continue;
             }
 
-            let num_fmt_id = find_or_push_num_fmt(&mut num_fmts, kind.default_format());
+            let num_fmt_id = find_or_push_num_fmt(&mut num_fmts, kind.default_format())?;
 
             let style_id = find_or_push(
                 &mut cell_xfs,
@@ -304,7 +314,7 @@ pub(crate) fn collect_styles(
 
     num_fmts.sort_by_key(|(id, _)| *id);
 
-    CollectedStyles {
+    Ok(CollectedStyles {
         fonts,
         fills,
         cell_xfs,
@@ -312,7 +322,7 @@ pub(crate) fn collect_styles(
         dxfs,
         cell_style_ids,
         rule_dxf_ids,
-    }
+    })
 }
 
 fn collect_shared_strings(sheets: &[Worksheet]) -> IndexMap<String, usize> {
@@ -339,9 +349,12 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     }
 }
 
-fn find_or_push_num_fmt(num_fmts: &mut Vec<(u32, String)>, format: &str) -> u32 {
+fn find_or_push_num_fmt(
+    num_fmts: &mut Vec<(u32, String)>,
+    format: &str,
+) -> Result<u32, OxlsxError> {
     if let Some((id, _)) = num_fmts.iter().find(|(_, existing)| existing == format) {
-        return *id;
+        return Ok(*id);
     }
     let next = num_fmts
         .iter()
@@ -349,9 +362,10 @@ fn find_or_push_num_fmt(num_fmts: &mut Vec<(u32, String)>, format: &str) -> u32 
         .max()
         .unwrap_or(163)
         .max(163)
-        + 1;
+        .checked_add(1)
+        .ok_or_else(|| OxlsxError::InvalidFormat("number format ID space exhausted".to_string()))?;
     num_fmts.push((next, format.to_string()));
-    next
+    Ok(next)
 }
 
 pub fn write_xlsx(
@@ -365,6 +379,17 @@ pub fn write_xlsx(
     // partial/0-byte artifact is left behind when the guard trips. The Python layer
     // also checks early, at add_table time.
     ensure_unique_table_display_names(wb.worksheets())?;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(OxlsxError::InvalidFormat(
+                "refusing to replace a symbolic-link destination".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     // Replacement metadata guarantee: preserve `std::fs::Permissions`
     // (Unix mode bits; Windows readonly attribute). ACLs, ownership changes,
@@ -560,7 +585,7 @@ fn write_xlsx_to_path(
         .enumerate()
         .filter_map(|(idx, sheet)| has_comments(sheet).then_some(idx + 1))
         .collect::<Vec<_>>();
-    let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original);
+    let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original)?;
     let mut written_entries = HashSet::new();
 
     // Allocate the internal `<table id>` for every table (verbatim tables keep
@@ -2189,6 +2214,72 @@ mod tests {
     }
 
     #[test]
+    fn native_writer_panic_poisons_later_save() {
+        let path = temp_path("oxlsx_native_writer_panic_poison.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), crate::OxlsxError> = writer.try_edit(|workbook| {
+                workbook.active_mut().unwrap().set_cell("A1", "partial");
+                panic!("injected edit panic");
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert!(matches!(
+            writer.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn native_writer_saved_destination_has_stable_absolute_identity() {
+        let filename = format!(
+            "oxlsx_writer_identity_{}.xlsx",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let relative = std::path::Path::new(&filename);
+        let absolute = std::env::current_dir().unwrap().join(relative);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+
+        writer.save(relative).unwrap();
+        writer.save(&absolute).unwrap();
+
+        let _ = fs::remove_file(absolute);
+    }
+
+    #[test]
+    fn maximum_custom_num_fmt_id_returns_error() {
+        let mut num_fmts = vec![(u32::MAX, "0.00".to_string())];
+        assert!(super::find_or_push_num_fmt(&mut num_fmts, "yyyy-mm-dd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_symlink_destination_without_replacing_it() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("target.xlsx");
+        let link = parent.path().join("destination.xlsx");
+        fs::write(&target, b"original").unwrap();
+        symlink("target.xlsx", &link).unwrap();
+
+        assert!(Workbook::new().save(&link).is_err());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
     fn native_writer_sheet_error_poisons_later_save() {
         let path = temp_path("oxlsx_native_writer_sheet_poison.xlsx");
         let _ = fs::remove_file(&path);
@@ -2304,7 +2395,7 @@ mod tests {
         let mut ws = Worksheet::new("Sheet");
         ws.set_cell("A1", "Hello");
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fonts.len(), 1);
         assert_eq!(collected.fills.len(), 2);
@@ -2338,7 +2429,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fonts.len(), 2);
         assert_eq!(collected.fills.len(), 2);
@@ -2358,7 +2449,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fills.len(), 3);
     }
