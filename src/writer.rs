@@ -3,7 +3,6 @@ use crate::{
     Color, Comment, ConditionalRule, Dxf, Fill, Font, Hyperlink, OxlsxError, StyleSheet, Value,
     Workbook, Worksheet, defined_names, sheet_rels,
 };
-use chrono::NaiveDate;
 use indexmap::IndexMap;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
@@ -1749,10 +1748,10 @@ fn write_cell(
             write_end(xml, "v")?;
             write_end(xml, "c")?;
         }
-        Value::Date(date) => {
+        Value::Date(_) | Value::DateTime(_) | Value::Time(_) | Value::Duration(_) => {
             write_start(xml, "c", &base)?;
             write_start(xml, "v", &[])?;
-            let value = date_to_excel_serial(*date).to_string();
+            let value = crate::temporal::to_excel_serial(value)?.to_string();
             xml.write_event(Event::Text(BytesText::new(&value)))?;
             write_end(xml, "v")?;
             write_end(xml, "c")?;
@@ -1768,11 +1767,6 @@ fn write_cell(
     }
 
     Ok(())
-}
-
-fn date_to_excel_serial(date: NaiveDate) -> i64 {
-    let epoch = NaiveDate::from_ymd_opt(1899, 12, 30).expect("valid excel epoch");
-    date.signed_duration_since(epoch).num_days()
 }
 
 fn write_color(xml: &mut Writer<Vec<u8>>, tag: &str, color: &Color) -> Result<(), OxlsxError> {

@@ -12,6 +12,7 @@ pub mod shared_strings;
 pub mod sheet_rels;
 pub mod styles;
 pub mod table;
+pub(crate) mod temporal;
 pub mod workbook_rels;
 pub mod writer;
 pub(crate) mod xml;

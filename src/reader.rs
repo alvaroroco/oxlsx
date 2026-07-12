@@ -12,7 +12,7 @@ use crate::xml::attr_value;
 use crate::{
     Fill, Font, Hyperlink, OxlsxError, ReadonlyWorkbook, SharedStrings, StyleId, StyleSheet,
 };
-use chrono::{Duration, NaiveDate};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use quick_xml::Reader;
 use quick_xml::Writer;
 use quick_xml::events::{BytesStart, Event};
@@ -37,6 +37,9 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Date(NaiveDate),
+    DateTime(NaiveDateTime),
+    Time(NaiveTime),
+    Duration(Duration),
     Formula(String),
 }
 
@@ -73,6 +76,24 @@ impl From<bool> for Value {
 impl From<NaiveDate> for Value {
     fn from(d: NaiveDate) -> Self {
         Value::Date(d)
+    }
+}
+
+impl From<NaiveDateTime> for Value {
+    fn from(value: NaiveDateTime) -> Self {
+        Value::DateTime(value)
+    }
+}
+
+impl From<NaiveTime> for Value {
+    fn from(value: NaiveTime) -> Self {
+        Value::Time(value)
+    }
+}
+
+impl From<Duration> for Value {
+    fn from(value: Duration) -> Self {
+        Value::Duration(value)
     }
 }
 
