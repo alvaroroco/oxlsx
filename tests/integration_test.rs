@@ -31,6 +31,7 @@ fn temporal_values_round_trip_with_openpyxl_default_formats() {
     let path = temp_path("oxlsx_temporal_round_trip.xlsx");
     let mut wb = Workbook::new();
     let ws = wb.active_mut().unwrap();
+
     let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
     let datetime = NaiveDateTime::new(
         date,
@@ -38,11 +39,13 @@ fn temporal_values_round_trip_with_openpyxl_default_formats() {
     );
     let time = NaiveTime::from_hms_milli_opt(12, 34, 56, 123).unwrap();
     let duration = Duration::milliseconds(-2);
+
     ws.set_cell("A1", Value::Date(date));
     ws.set_cell("B1", Value::DateTime(datetime));
     ws.set_cell("C1", Value::Time(time));
     ws.set_cell("D1", Value::Duration(duration));
     wb.save(&path).unwrap();
+
     let reopened = Workbook::open(&path).unwrap();
     let ws = reopened.active().unwrap();
     assert_eq!(ws.cell("A1").unwrap().value(), &Value::Date(date));
