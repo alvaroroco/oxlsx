@@ -366,23 +366,188 @@ pub fn write_xlsx(
     // also checks early, at add_table time.
     ensure_unique_table_display_names(wb.worksheets())?;
 
-    if source_path.is_some_and(|source| source == path) {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let temp = NamedTempFile::new_in(parent)?;
-        write_xlsx_to_path(wb, temp.path(), source_path)?;
-        temp.persist(path)
-            .map_err(|err| OxlsxError::Io(err.error))?;
-        return Ok(());
+    // Replacement metadata guarantee: preserve `std::fs::Permissions`
+    // (Unix mode bits; Windows readonly attribute). ACLs, ownership changes,
+    // extended attributes, and timestamps are intentionally NOT claimed by
+    // this cross-platform API and require platform-specific acceptance tests.
+    let destination_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let parent = normalized_parent(path);
+    let temp = new_sibling_temp(parent, destination_permissions.as_ref())?;
+    let mut completed = write_xlsx_to_path(wb, temp.path(), source_path)?;
+    completed.flush()?;
+    apply_permissions_before_commit(&completed, destination_permissions.as_ref())?;
+    completed.sync_all()?;
+    drop(completed);
+    let windows_permissions_cleared =
+        prepare_windows_destination_for_replace(path, destination_permissions.as_ref())?;
+    if let Err(error) = temp.persist(path) {
+        restore_windows_destination_permissions(
+            path,
+            destination_permissions.as_ref(),
+            windows_permissions_cleared,
+        );
+        return Err(OxlsxError::Io(error.error));
     }
+    apply_permissions_after_commit(path, destination_permissions.as_ref());
+    // The atomic rename is the public commit point. Directory sync strengthens
+    // crash durability where supported, but the public save contract does not
+    // promise crash-durable directory entries. A post-commit sync failure must
+    // therefore never be reported as an ordinary save failure or poison the
+    // state of NativeWorkbookWriter after the destination was replaced.
+    let _ = sync_parent_directory(parent);
+    Ok(())
+}
 
-    write_xlsx_to_path(wb, path, source_path)
+#[cfg(not(windows))]
+fn apply_permissions_before_commit(
+    completed: &File,
+    permissions: Option<&std::fs::Permissions>,
+) -> Result<(), OxlsxError> {
+    if let Some(permissions) = permissions {
+        completed.set_permissions(permissions.clone())?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_permissions_before_commit(
+    _completed: &File,
+    _permissions: Option<&std::fs::Permissions>,
+) -> Result<(), OxlsxError> {
+    // Do not make the temporary file readonly: a failed persist would then be
+    // unable to remove it. The readonly attribute is restored after commit.
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_permissions_after_commit(path: &Path, permissions: Option<&std::fs::Permissions>) {
+    if let Some(permissions) = permissions {
+        // Commit already succeeded, so an attribute-restoration error cannot be
+        // reported as an ordinary save failure. This preserves the readonly
+        // attribute when Windows permits it; ACL preservation is not claimed.
+        let _ = std::fs::set_permissions(path, permissions.clone());
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_permissions_after_commit(_path: &Path, _permissions: Option<&std::fs::Permissions>) {}
+
+fn normalized_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(unix)]
+fn new_sibling_temp(
+    parent: &Path,
+    destination_permissions: Option<&std::fs::Permissions>,
+) -> Result<NamedTempFile, std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Match File::create's 0o666 request for new files, allowing the process
+    // umask to restrict it. Replacements request the prior mode and later apply
+    // it exactly after writing, because umask must not alter existing intent.
+    let requested = destination_permissions
+        .cloned()
+        .unwrap_or_else(|| std::fs::Permissions::from_mode(0o666));
+    tempfile::Builder::new()
+        .permissions(requested)
+        .tempfile_in(parent)
+}
+
+#[cfg(not(unix))]
+fn new_sibling_temp(
+    parent: &Path,
+    _destination_permissions: Option<&std::fs::Permissions>,
+) -> Result<NamedTempFile, std::io::Error> {
+    NamedTempFile::new_in(parent)
+}
+
+#[cfg(windows)]
+fn prepare_windows_destination_for_replace(
+    path: &Path,
+    permissions: Option<&std::fs::Permissions>,
+) -> Result<bool, OxlsxError> {
+    let Some(permissions) = permissions.filter(|permissions| permissions.readonly()) else {
+        return Ok(false);
+    };
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    std::fs::set_permissions(path, writable)?;
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn prepare_windows_destination_for_replace(
+    _path: &Path,
+    _permissions: Option<&std::fs::Permissions>,
+) -> Result<bool, OxlsxError> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn restore_windows_destination_permissions(
+    path: &Path,
+    permissions: Option<&std::fs::Permissions>,
+    permissions_were_cleared: bool,
+) {
+    if permissions_were_cleared && let Some(permissions) = permissions {
+        let _ = std::fs::set_permissions(path, permissions.clone());
+    }
+}
+
+#[cfg(not(windows))]
+fn restore_windows_destination_permissions(
+    _path: &Path,
+    _permissions: Option<&std::fs::Permissions>,
+    _permissions_were_cleared: bool,
+) {
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<(), OxlsxError> {
+    #[cfg(test)]
+    if take_injected_directory_sync_failure() {
+        return Err(std::io::Error::other("injected directory sync failure").into());
+    }
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<(), OxlsxError> {
+    #[cfg(test)]
+    if take_injected_directory_sync_failure() {
+        return Err(std::io::Error::other("injected directory sync failure").into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn take_injected_directory_sync_failure() -> bool {
+    DIRECTORY_SYNC_FAILURE.with(|failure| failure.replace(false))
+}
+
+#[cfg(test)]
+fn inject_directory_sync_failure_once() {
+    DIRECTORY_SYNC_FAILURE.with(|failure| failure.set(true));
 }
 
 fn write_xlsx_to_path(
     wb: &Workbook,
     path: &Path,
     source_path: Option<&Path>,
-) -> Result<(), OxlsxError> {
+) -> Result<File, OxlsxError> {
     let file = File::create(path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default();
@@ -619,8 +784,7 @@ fn write_xlsx_to_path(
         )?;
     }
 
-    zip.finish()?;
-    Ok(())
+    Ok(zip.finish()?)
 }
 
 fn copy_unknown_entries(
@@ -2042,6 +2206,25 @@ mod tests {
     }
 
     #[test]
+    fn rename_failure_cleans_sibling_temp_file() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("destination.xlsx");
+        fs::create_dir(&destination).unwrap();
+        let before = fs::read_dir(parent.path()).unwrap().count();
+
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        assert!(writer.save(&destination).is_err());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), before);
+        assert!(destination.is_dir());
+        let recovery = parent.path().join("recovery.xlsx");
+        assert!(matches!(
+            writer.save(&recovery),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!recovery.exists());
+    }
+
+    #[test]
     fn native_writer_relative_save_commits_and_stays_saved() {
         let filename = format!(
             "oxlsx_relative_{}.xlsx",
@@ -2054,6 +2237,18 @@ mod tests {
         let mut writer = super::native_writer::NativeWorkbookWriter::new();
         writer.save(path).unwrap();
         writer.save(path).unwrap();
+        assert!(path.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn post_commit_directory_sync_failure_does_not_poison_saved_state() {
+        let path = temp_path("oxlsx_post_commit_sync_failure.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        super::inject_directory_sync_failure_once();
+        writer.save(&path).unwrap();
+        writer.save(&path).unwrap();
         assert!(path.exists());
         let _ = fs::remove_file(path);
     }
