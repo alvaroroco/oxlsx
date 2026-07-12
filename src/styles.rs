@@ -393,14 +393,23 @@ impl StyleSheet {
     }
 
     pub fn is_date_format(&self, style_id: StyleId) -> bool {
-        match self.num_fmt_id(style_id) {
-            Some(id) if (14..=17).contains(&id) || id == 22 => true,
-            Some(id) if id >= 164 => self
+        matches!(
+            self.temporal_kind(style_id),
+            Some(crate::temporal::TemporalKind::Date | crate::temporal::TemporalKind::DateTime)
+        )
+    }
+
+    pub(crate) fn temporal_kind(&self, style_id: StyleId) -> Option<crate::temporal::TemporalKind> {
+        match self.num_fmt_id(style_id)? {
+            14..=17 => Some(crate::temporal::TemporalKind::Date),
+            18..=21 => Some(crate::temporal::TemporalKind::Time),
+            22 => Some(crate::temporal::TemporalKind::DateTime),
+            45 | 47 => Some(crate::temporal::TemporalKind::Time),
+            46 => Some(crate::temporal::TemporalKind::Duration),
+            id => self
                 .num_fmts
                 .get(&id)
-                .map(|fmt| fmt.contains('y') || fmt.contains('d'))
-                .unwrap_or(false),
-            _ => false,
+                .and_then(|format| crate::temporal::format_kind(format)),
         }
     }
 
@@ -446,7 +455,7 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Dxf, Fill, Font, StyleId, StyleSheet};
+    use super::{CellXf, Color, Dxf, Fill, Font, StyleId, StyleSheet};
     use std::io::Cursor;
 
     const SAMPLE_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -571,5 +580,41 @@ mod tests {
         assert!(sheet.is_date_format(StyleId(2)));
         assert!(!sheet.is_date_format(StyleId(0)));
         assert!(!sheet.is_date_format(StyleId(3)));
+    }
+
+    #[test]
+    fn classifies_builtin_time_and_duration_formats() {
+        let sheet = StyleSheet {
+            cell_xfs: vec![
+                CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 45,
+                },
+                CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 46,
+                },
+                CellXf {
+                    font_id: 0,
+                    fill_id: 0,
+                    num_fmt_id: 47,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            sheet.temporal_kind(StyleId(0)),
+            Some(crate::temporal::TemporalKind::Time)
+        );
+        assert_eq!(
+            sheet.temporal_kind(StyleId(1)),
+            Some(crate::temporal::TemporalKind::Duration)
+        );
+        assert_eq!(
+            sheet.temporal_kind(StyleId(2)),
+            Some(crate::temporal::TemporalKind::Time)
+        );
     }
 }

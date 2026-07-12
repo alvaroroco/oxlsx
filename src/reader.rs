@@ -1908,11 +1908,9 @@ impl CellDecoder {
             };
 
             if let Value::Number(n) = value
-                && styles.is_date_format(builder.style_id)
+                && let Some(kind) = styles.temporal_kind(builder.style_id)
             {
-                value = excel_serial_to_date(n)
-                    .map(Value::Date)
-                    .unwrap_or(Value::Number(n));
+                value = crate::temporal::from_excel_serial(n, kind).unwrap_or(Value::Number(n));
             }
 
             builder.value = value;
@@ -2037,10 +2035,12 @@ fn parse_row_height(
     Ok(())
 }
 
+#[cfg(test)]
 fn excel_serial_to_date(serial: f64) -> Option<NaiveDate> {
-    let epoch = NaiveDate::from_ymd_opt(1899, 12, 30)?;
-    let days = serial as i64;
-    epoch.checked_add_signed(Duration::days(days))
+    match crate::temporal::from_excel_serial(serial, crate::temporal::TemporalKind::Date)? {
+        Value::Date(date) => Some(date),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2353,7 +2353,7 @@ mod tests {
         );
         assert_eq!(
             super::excel_serial_to_date(1.0),
-            NaiveDate::from_ymd_opt(1899, 12, 31)
+            NaiveDate::from_ymd_opt(1900, 1, 1)
         );
     }
 

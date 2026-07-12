@@ -139,9 +139,9 @@ pub(crate) fn collect_styles(
 
     for (sheet_idx, sheet) in sheets.iter().enumerate() {
         for (reference, cell) in sheet.cells() {
-            if !matches!(cell.value(), Value::Date(_)) {
+            let Some(kind) = crate::temporal::value_kind(cell.value()) else {
                 continue;
-            }
+            };
 
             let style_key = (sheet_idx, reference.clone());
             let existing_style_id = cell_style_ids
@@ -158,16 +158,18 @@ pub(crate) fn collect_styles(
                     num_fmt_id: 0,
                 });
 
-            if is_builtin_date_num_fmt(existing_xf.num_fmt_id) {
+            if preserve_original && existing_xf.num_fmt_id != 0 {
                 continue;
             }
+
+            let num_fmt_id = find_or_push_num_fmt(&mut num_fmts, kind.default_format());
 
             let style_id = find_or_push(
                 &mut cell_xfs,
                 CellXf {
                     font_id: existing_xf.font_id,
                     fill_id: existing_xf.fill_id,
-                    num_fmt_id: 14,
+                    num_fmt_id,
                 },
             ) as u32;
             cell_style_ids.insert(style_key, style_id);
@@ -243,8 +245,19 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     }
 }
 
-fn is_builtin_date_num_fmt(num_fmt_id: u32) -> bool {
-    (14..=17).contains(&num_fmt_id) || num_fmt_id == 22
+fn find_or_push_num_fmt(num_fmts: &mut Vec<(u32, String)>, format: &str) -> u32 {
+    if let Some((id, _)) = num_fmts.iter().find(|(_, existing)| existing == format) {
+        return *id;
+    }
+    let next = num_fmts
+        .iter()
+        .map(|(id, _)| *id)
+        .max()
+        .unwrap_or(163)
+        .max(163)
+        + 1;
+    num_fmts.push((next, format.to_string()));
+    next
 }
 
 pub fn write_xlsx(

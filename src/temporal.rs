@@ -1,8 +1,120 @@
 use crate::{OxlsxError, Value};
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
 
+pub(crate) const DATE_FORMAT: &str = "yyyy-mm-dd";
+pub(crate) const DATETIME_FORMAT: &str = "yyyy-mm-dd h:mm:ss";
+pub(crate) const TIME_FORMAT: &str = "h:mm:ss";
+pub(crate) const DURATION_FORMAT: &str = "[hh]:mm:ss";
+
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const NANOS_PER_MILLI: i64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalKind {
+    Date,
+    DateTime,
+    Time,
+    Duration,
+}
+
+impl TemporalKind {
+    pub(crate) fn default_format(self) -> &'static str {
+        match self {
+            Self::Date => DATE_FORMAT,
+            Self::DateTime => DATETIME_FORMAT,
+            Self::Time => TIME_FORMAT,
+            Self::Duration => DURATION_FORMAT,
+        }
+    }
+}
+
+pub(crate) fn value_kind(value: &Value) -> Option<TemporalKind> {
+    match value {
+        Value::Date(_) => Some(TemporalKind::Date),
+        Value::DateTime(_) => Some(TemporalKind::DateTime),
+        Value::Time(_) => Some(TemporalKind::Time),
+        Value::Duration(_) => Some(TemporalKind::Duration),
+        _ => None,
+    }
+}
+
+pub(crate) fn format_kind(format: &str) -> Option<TemporalKind> {
+    let normalized = strip_format_literals(first_format_section(format));
+    if normalized.contains("[h]")
+        || normalized.contains("[hh]")
+        || normalized.contains("[m]")
+        || normalized.contains("[mm]")
+        || normalized.contains("[s]")
+        || normalized.contains("[ss]")
+    {
+        return Some(TemporalKind::Duration);
+    }
+    let has_date = normalized.contains('y') || normalized.contains('d');
+    let has_time = normalized.contains('h') || normalized.contains('s');
+    match (has_date, has_time) {
+        (true, true) => Some(TemporalKind::DateTime),
+        (true, false) => Some(TemporalKind::Date),
+        (false, true) => Some(TemporalKind::Time),
+        (false, false) => None,
+    }
+}
+
+fn first_format_section(format: &str) -> &str {
+    let mut quoted = false;
+    let mut bracketed = false;
+    let mut escaped = false;
+    for (index, ch) in format.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' | '_' | '*' => escaped = true,
+            '"' if !bracketed => quoted = !quoted,
+            '[' if !quoted => bracketed = true,
+            ']' if !quoted => bracketed = false,
+            ';' if !quoted && !bracketed => return &format[..index],
+            _ => {}
+        }
+    }
+    format
+}
+
+fn strip_format_literals(format: &str) -> String {
+    let lowercase = format.to_ascii_lowercase();
+    let mut chars = lowercase.chars().peekable();
+    let mut normalized = String::with_capacity(format.len());
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                for literal in chars.by_ref() {
+                    if literal == '"' {
+                        break;
+                    }
+                }
+            }
+            '\\' | '_' | '*' => {
+                let _ = chars.next();
+            }
+            '[' => {
+                let mut bracket = String::new();
+                for part in chars.by_ref() {
+                    if part == ']' {
+                        break;
+                    }
+                    bracket.push(part);
+                }
+                if matches!(bracket.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
+                    normalized.push('[');
+                    normalized.push_str(&bracket);
+                    normalized.push(']');
+                }
+            }
+            _ => normalized.push(ch),
+        }
+    }
+    normalized
+}
 
 pub(crate) fn to_excel_serial(value: &Value) -> Result<f64, OxlsxError> {
     match value {
@@ -83,6 +195,45 @@ fn validate_date(date: NaiveDate) -> Result<(), OxlsxError> {
     Ok(())
 }
 
+pub(crate) fn from_excel_serial(serial: f64, kind: TemporalKind) -> Option<Value> {
+    if !serial.is_finite() {
+        return None;
+    }
+    let scaled = serial * MILLIS_PER_DAY as f64;
+    if scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return None;
+    }
+    let mut millis = scaled.round_ties_even() as i64;
+    match kind {
+        TemporalKind::Date => {
+            let mut days = serial.floor() as i64;
+            if (1..60).contains(&days) {
+                days += 1;
+            }
+            let date = excel_epoch().checked_add_signed(Duration::days(days))?;
+            validate_date(date).ok()?;
+            Some(Value::Date(date))
+        }
+        TemporalKind::DateTime => {
+            if (MILLIS_PER_DAY..60 * MILLIS_PER_DAY).contains(&millis) {
+                millis += MILLIS_PER_DAY;
+            }
+            let datetime = excel_epoch()
+                .and_hms_opt(0, 0, 0)?
+                .checked_add_signed(Duration::milliseconds(millis))?;
+            validate_date(datetime.date()).ok()?;
+            Some(Value::DateTime(datetime))
+        }
+        TemporalKind::Time if !(0.0..1.0).contains(&serial) => Some(Value::Number(serial)),
+        TemporalKind::Time => Some(Value::Time(
+            NaiveTime::from_hms_milli_opt(0, 0, 0, 0)?
+                .overflowing_add_signed(Duration::milliseconds(millis))
+                .0,
+        )),
+        TemporalKind::Duration => Some(Value::Duration(Duration::milliseconds(millis))),
+    }
+}
+
 fn excel_epoch() -> NaiveDate {
     NaiveDate::from_ymd_opt(1899, 12, 30).expect("valid Excel epoch")
 }
@@ -131,9 +282,27 @@ pub(crate) fn round_duration_to_millis(duration: Duration) -> Result<i64, OxlsxE
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_serial_from_millis, to_excel_serial};
+    use super::{
+        TemporalKind, exact_serial_from_millis, format_kind, from_excel_serial, to_excel_serial,
+    };
     use crate::Value;
     use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+
+    #[test]
+    fn format_classification_ignores_colors_conditions_and_quoted_literals() {
+        assert_eq!(format_kind("[Red]0.00"), None);
+        assert_eq!(format_kind("[>=100]0;[Red]0"), None);
+        assert_eq!(
+            format_kind(r#"yyyy-mm-dd "days""#),
+            Some(TemporalKind::Date)
+        );
+    }
+
+    #[test]
+    fn format_classification_uses_first_section_only() {
+        assert_eq!(format_kind("0;yyyy-mm-dd"), None);
+        assert_eq!(format_kind("yyyy-mm-dd;0"), Some(TemporalKind::Date));
+    }
 
     #[test]
     fn rejects_lossy_large_duration_and_post_rounding_datetime_overflow() {
@@ -154,5 +323,21 @@ mod tests {
     fn rejects_chrono_leap_seconds_and_invalid_time_serial_components() {
         let leap = NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).unwrap();
         assert!(to_excel_serial(&Value::Time(leap)).is_err());
+        assert_eq!(
+            from_excel_serial(1.25, TemporalKind::Time),
+            Some(Value::Number(1.25))
+        );
+        assert_eq!(
+            from_excel_serial(-0.25, TemporalKind::Time),
+            Some(Value::Number(-0.25))
+        );
+    }
+
+    #[test]
+    fn format_section_parser_honors_spacing_and_fill_escapes() {
+        assert_eq!(format_kind("0_;yyyy-mm-dd"), Some(TemporalKind::Date));
+        assert_eq!(format_kind("0*;yyyy-mm-dd"), Some(TemporalKind::Date));
+        assert_eq!(format_kind("0_;0;yyyy-mm-dd"), None);
+        assert_eq!(format_kind("0*;0;yyyy-mm-dd"), None);
     }
 }

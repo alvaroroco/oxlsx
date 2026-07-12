@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use oxlsx::{
     Color, Comment, ConditionalRule, Dxf, Fill, Font, OxlsxError, StyleId, Table, TableStyleInfo,
     Value, Workbook,
@@ -24,6 +24,117 @@ fn read_zip_entry(path: &std::path::Path, entry: &str) -> String {
         .read_to_string(&mut xml)
         .unwrap();
     xml
+}
+
+#[test]
+fn temporal_values_round_trip_with_openpyxl_default_formats() {
+    let path = temp_path("oxlsx_temporal_round_trip.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
+    let datetime = NaiveDateTime::new(
+        date,
+        NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap(),
+    );
+    let time = NaiveTime::from_hms_milli_opt(12, 34, 56, 123).unwrap();
+    let duration = Duration::milliseconds(-2);
+    ws.set_cell("A1", Value::Date(date));
+    ws.set_cell("B1", Value::DateTime(datetime));
+    ws.set_cell("C1", Value::Time(time));
+    ws.set_cell("D1", Value::Duration(duration));
+    wb.save(&path).unwrap();
+    let reopened = Workbook::open(&path).unwrap();
+    let ws = reopened.active().unwrap();
+    assert_eq!(ws.cell("A1").unwrap().value(), &Value::Date(date));
+    assert_eq!(ws.cell("B1").unwrap().value(), &Value::DateTime(datetime));
+    assert_eq!(ws.cell("C1").unwrap().value(), &Value::Time(time));
+    assert_eq!(
+        ws.cell("D1").unwrap().value(),
+        &Value::Duration(Duration::milliseconds(-2))
+    );
+
+    let styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(styles.contains(r#"formatCode="yyyy-mm-dd""#));
+    assert!(styles.contains(r#"formatCode="yyyy-mm-dd h:mm:ss""#));
+    assert!(styles.contains(r#"formatCode="h:mm:ss""#));
+    assert!(styles.contains(r#"formatCode="[hh]:mm:ss""#));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn temporal_millisecond_rounding_rolls_datetime_and_time_to_next_day_boundary() {
+    let path = temp_path("oxlsx_temporal_rollover.xlsx");
+    let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
+    let near_midnight = NaiveTime::from_hms_micro_opt(23, 59, 59, 999_500).unwrap();
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell(
+        "A1",
+        Value::DateTime(NaiveDateTime::new(date, near_midnight)),
+    );
+    wb.active_mut()
+        .unwrap()
+        .set_cell("B1", Value::Time(near_midnight));
+    wb.save(&path).unwrap();
+
+    let reopened = Workbook::open(&path).unwrap();
+    let ws = reopened.active().unwrap();
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::DateTime(NaiveDateTime::new(
+            date.succ_opt().unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        ))
+    );
+    assert_eq!(
+        ws.cell("B1").unwrap().value(),
+        &Value::Time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn temporal_ties_round_to_even_for_positive_and_negative_durations() {
+    let path = temp_path("oxlsx_temporal_ties_even.xlsx");
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", Value::Duration(Duration::microseconds(500)));
+    ws.set_cell("B1", Value::Duration(Duration::microseconds(1_500)));
+    ws.set_cell("C1", Value::Duration(Duration::microseconds(-500)));
+    ws.set_cell("D1", Value::Duration(Duration::microseconds(-1_500)));
+    wb.save(&path).unwrap();
+
+    let reopened = Workbook::open(&path).unwrap();
+    let ws = reopened.active().unwrap();
+    assert_eq!(
+        ws.cell("A1").unwrap().value(),
+        &Value::Duration(Duration::zero())
+    );
+    assert_eq!(
+        ws.cell("B1").unwrap().value(),
+        &Value::Duration(Duration::milliseconds(2))
+    );
+    assert_eq!(
+        ws.cell("C1").unwrap().value(),
+        &Value::Duration(Duration::zero())
+    );
+    assert_eq!(
+        ws.cell("D1").unwrap().value(),
+        &Value::Duration(Duration::milliseconds(-2))
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn temporal_rmw_preserves_existing_explicit_number_format() {
+    let path = temp_path("oxlsx_temporal_preserve_custom_format.xlsx");
+    let wb = Workbook::open("samples/multi_sheet.xlsx").unwrap();
+    wb.save(&path).unwrap();
+    let styles = read_zip_entry(&path, "xl/styles.xml");
+    assert!(styles.contains(r#"numFmtId="164" formatCode="dd/mm/yyyy""#));
+    assert!(!styles.contains(r#"formatCode="yyyy-mm-dd""#));
+    let _ = fs::remove_file(path);
 }
 
 fn attr_in(fragment: &str, attr: &str) -> Option<String> {
