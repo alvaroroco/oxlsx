@@ -330,6 +330,9 @@ fn value_to_header(value: &Value) -> String {
             }
         }
         Value::Date(date) => date.to_string(),
+        Value::DateTime(datetime) => datetime.to_string(),
+        Value::Time(time) => time.to_string(),
+        Value::Duration(duration) => duration.to_string(),
         Value::Empty => String::new(),
     }
 }

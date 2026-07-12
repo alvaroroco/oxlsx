@@ -6,7 +6,7 @@ use crate::{
     Cell, Color, Comment, ConditionalRule, DefinedName, DefinedNames, Dxf, Fill, Font, Hyperlink,
     OxlsxError, StyleSheet, Table, TableColumn, TableStyleInfo, Value, Workbook,
 };
-use chrono::Datelike;
+use chrono::{Datelike, Duration, Timelike};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1114,7 +1114,7 @@ struct PyCell {
 #[pymethods]
 impl PyCell {
     #[getter]
-    fn value(&self, py: Python<'_>) -> PyObject {
+    fn value(&self, py: Python<'_>) -> PyResult<PyObject> {
         value_to_py(self.inner.value(), py)
     }
 
@@ -1727,7 +1727,7 @@ fn rows_to_py_tuples(
         let mut items: Vec<PyObject> = Vec::with_capacity(row.len());
         if values_only {
             for cell in row {
-                items.push(value_to_py(cell.value(), py));
+                items.push(value_to_py(cell.value(), py)?);
             }
         } else {
             for cell in row {
@@ -1742,8 +1742,8 @@ fn rows_to_py_tuples(
     Ok(tuples)
 }
 
-fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {
-    match value {
+fn value_to_py(value: &Value, py: Python<'_>) -> PyResult<PyObject> {
+    Ok(match value {
         Value::Empty => py.None(),
         Value::String(s) => s.into_py(py),
         Value::Number(n)
@@ -1762,17 +1762,82 @@ fn value_to_py(value: &Value, py: Python<'_>) -> PyObject {
             // exposed under the limited API (abi3), and this path compiles
             // identically for both the interpreter-linked and abi3 builds while
             // still producing a genuine `datetime.date` instance.
-            let datetime = PyModule::import_bound(py, "datetime")
-                .expect("datetime module is always available");
+            if !(1..=9_999).contains(&date.year()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "date is outside Python's year range 1..=9999",
+                ));
+            }
+            let datetime = PyModule::import_bound(py, "datetime")?;
             datetime
-                .getattr("date")
-                .expect("datetime.date always exists")
-                .call1((date.year(), date.month(), date.day()))
-                .expect("NaiveDate is always a valid Python date")
+                .getattr("date")?
+                .call1((date.year(), date.month(), date.day()))?
+                .into_py(py)
+        }
+        Value::DateTime(value) => {
+            if !(1..=9_999).contains(&value.year()) || value.nanosecond() >= 1_000_000_000 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "datetime is outside Python's supported temporal range",
+                ));
+            }
+            let datetime = PyModule::import_bound(py, "datetime")?;
+            datetime
+                .getattr("datetime")?
+                .call1((
+                    value.year(),
+                    value.month(),
+                    value.day(),
+                    value.hour(),
+                    value.minute(),
+                    value.second(),
+                    value.nanosecond() / 1_000,
+                ))?
+                .into_py(py)
+        }
+        Value::Time(value) => {
+            if value.nanosecond() >= 1_000_000_000 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Python cannot represent leap-second times",
+                ));
+            }
+            let datetime = PyModule::import_bound(py, "datetime")?;
+            datetime
+                .getattr("time")?
+                .call1((
+                    value.hour(),
+                    value.minute(),
+                    value.second(),
+                    value.nanosecond() / 1_000,
+                ))?
+                .into_py(py)
+        }
+        Value::Duration(value) => {
+            let datetime = PyModule::import_bound(py, "datetime")?;
+            let mut whole_seconds = value.num_seconds();
+            let remainder = *value - Duration::seconds(whole_seconds);
+            let mut nanos = remainder.num_nanoseconds().ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "duration has an unrepresentable sub-second remainder",
+                )
+            })?;
+            if nanos < 0 {
+                whole_seconds -= 1;
+                nanos += 1_000_000_000;
+            }
+            let days = whole_seconds.div_euclid(86_400);
+            if !(-999_999_999..=999_999_999).contains(&days) {
+                return Err(pyo3::exceptions::PyOverflowError::new_err(
+                    "duration is outside Python timedelta's day range",
+                ));
+            }
+            let seconds = whole_seconds.rem_euclid(86_400);
+            let microseconds = nanos / 1_000;
+            datetime
+                .getattr("timedelta")?
+                .call1((days, seconds, microseconds))?
                 .into_py(py)
         }
         Value::Formula(formula) => format!("={formula}").into_py(py),
-    }
+    })
 }
 
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
