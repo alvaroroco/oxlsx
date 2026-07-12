@@ -127,6 +127,56 @@ def test_cell_value_date(load_wb):
     assert v.year == 2025 and v.month == 1 and v.day == 21
 
 
+@pytest.mark.parametrize(
+    ("value", "expected", "number_format"),
+    [
+        (
+            datetime.date(2025, 1, 21),
+            datetime.datetime(2025, 1, 21),
+            "yyyy-mm-dd",
+        ),
+        (
+            datetime.datetime(2025, 1, 21, 23, 59, 59, 999500),
+            datetime.datetime(2025, 1, 22),
+            "yyyy-mm-dd h:mm:ss",
+        ),
+        (
+            datetime.time(12, 34, 56, 1600),
+            datetime.time(12, 34, 56, 2000),
+            "h:mm:ss",
+        ),
+        (
+            datetime.timedelta(microseconds=-1500),
+            datetime.timedelta(milliseconds=-2),
+            "[hh]:mm:ss",
+        ),
+    ],
+)
+def test_temporal_write_round_trip_matches_openpyxl_defaults(
+    new_wb, value, expected, number_format
+):
+    wb, save = new_wb
+    wb.active["A1"] = value
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        path = tmp.name
+    try:
+        save(path)
+        reopened = openpyxl.load_workbook(path)
+        cell = reopened.active["A1"]
+        assert cell.value == expected
+        assert cell.number_format == number_format
+    finally:
+        os.unlink(path)
+
+
+def test_oxlsx_rejects_timezone_aware_temporal_values():
+    wb = oxlsx.Workbook()
+    with pytest.raises(ValueError, match="timezone"):
+        wb.active["A1"] = datetime.datetime.now(datetime.timezone.utc)
+    with pytest.raises(ValueError, match="timezone"):
+        wb.active["A1"] = datetime.time(12, tzinfo=datetime.timezone.utc)
+
+
 def test_cell_value_none(load_wb):
     # A reference that holds no data → None
     wb = load_wb("samples/test.xlsx")
@@ -1631,4 +1681,3 @@ def test_cell_zero_index_raises_valueerror():
 
     # Valid 1-based access still works.
     assert ws.cell(row=1, column=1).value == "valid"
-

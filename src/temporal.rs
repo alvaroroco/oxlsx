@@ -131,7 +131,13 @@ pub(crate) fn to_excel_serial(value: &Value) -> Result<f64, OxlsxError> {
                 .checked_add_signed(Duration::milliseconds(millis))
                 .ok_or_else(|| temporal_range_error("datetime"))?;
             validate_date(normalized.date())?;
-            exact_serial_from_millis(adjust_early_date_millis(millis))
+            let time_millis = i64::from(normalized.time().num_seconds_from_midnight()) * 1_000
+                + i64::from(normalized.time().nanosecond()) / NANOS_PER_MILLI;
+            let serial_millis = date_days(normalized.date())
+                .checked_mul(MILLIS_PER_DAY)
+                .and_then(|days| days.checked_add(time_millis))
+                .ok_or_else(|| temporal_range_error("datetime"))?;
+            exact_serial_from_millis(serial_millis)
         }
         Value::Time(time) => {
             validate_time(*time)?;
@@ -246,14 +252,6 @@ fn date_days(date: NaiveDate) -> i64 {
     days
 }
 
-fn adjust_early_date_millis(millis: i64) -> i64 {
-    if (MILLIS_PER_DAY..=60 * MILLIS_PER_DAY).contains(&millis) {
-        millis - MILLIS_PER_DAY
-    } else {
-        millis
-    }
-}
-
 pub(crate) fn round_duration_to_millis(duration: Duration) -> Result<i64, OxlsxError> {
     let seconds = duration.num_seconds();
     let remainder = duration - Duration::seconds(seconds);
@@ -331,6 +329,23 @@ mod tests {
             from_excel_serial(-0.25, TemporalKind::Time),
             Some(Value::Number(-0.25))
         );
+    }
+
+    #[test]
+    fn datetime_serials_cross_the_excel_1900_leap_day_boundary() {
+        let midnight = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(1900, 2, 28).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        let noon = midnight + Duration::hours(12);
+        let rollover = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(1900, 2, 28).unwrap(),
+            NaiveTime::from_hms_micro_opt(23, 59, 59, 999_500).unwrap(),
+        );
+
+        assert_eq!(to_excel_serial(&Value::DateTime(midnight)).unwrap(), 59.0);
+        assert_eq!(to_excel_serial(&Value::DateTime(noon)).unwrap(), 59.5);
+        assert_eq!(to_excel_serial(&Value::DateTime(rollover)).unwrap(), 61.0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::{
     Cell, Color, Comment, ConditionalRule, DefinedName, DefinedNames, Dxf, Fill, Font, Hyperlink,
     OxlsxError, StyleSheet, Table, TableColumn, TableStyleInfo, Value, Workbook,
 };
-use chrono::{Datelike, Duration, Timelike};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1865,26 +1865,88 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::String(value));
     }
 
-    // Match `datetime.date` (and its `datetime.datetime` subclass) via the
-    // object protocol instead of downcasting to the `PyDate` C-API type, which
-    // is unavailable under the limited API (abi3). `datetime.datetime` is a
-    // subclass of `datetime.date`, so `is_instance` preserves the prior
-    // `downcast::<PyDate>()` behaviour for both types.
+    // Match datetime subclasses through the object protocol instead of the
+    // limited-API-incompatible PyDate C API. Check datetime before date because
+    // Python's datetime is a date subclass and must retain its time component.
     let datetime = PyModule::import_bound(obj.py(), "datetime")?;
+    let datetime_cls = datetime.getattr("datetime")?;
+    if obj.is_instance(&datetime_cls)? {
+        reject_timezone(obj)?;
+        let date = extract_date(obj)?;
+        let time = extract_time(obj)?;
+        return validate_python_temporal(Value::DateTime(NaiveDateTime::new(date, time)));
+    }
+
+    let time_cls = datetime.getattr("time")?;
+    if obj.is_instance(&time_cls)? {
+        reject_timezone(obj)?;
+        return validate_python_temporal(Value::Time(extract_time(obj)?));
+    }
+
+    let timedelta_cls = datetime.getattr("timedelta")?;
+    if obj.is_instance(&timedelta_cls)? {
+        let days: i64 = obj.getattr("days")?.extract()?;
+        let seconds: i64 = obj.getattr("seconds")?.extract()?;
+        let microseconds: i64 = obj.getattr("microseconds")?.extract()?;
+        let duration = Duration::days(days)
+            .checked_add(&Duration::seconds(seconds))
+            .and_then(|value| value.checked_add(&Duration::microseconds(microseconds)))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("timedelta is outside oxlsx range")
+            })?;
+        return validate_python_temporal(Value::Duration(duration));
+    }
+
     let date_cls = datetime.getattr("date")?;
     if obj.is_instance(&date_cls)? {
-        let year: i32 = obj.getattr("year")?.extract()?;
-        let month: u32 = obj.getattr("month")?.extract()?;
-        let day: u32 = obj.getattr("day")?.extract()?;
-        return Ok(Value::Date(
-            chrono::NaiveDate::from_ymd_opt(year, month, day)
-                .expect("datetime.date always represents a valid date"),
-        ));
+        return validate_python_temporal(Value::Date(extract_date(obj)?));
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
         "Unsupported Python value type for oxlsx.Value",
     ))
+}
+
+fn validate_python_temporal(value: Value) -> PyResult<Value> {
+    if let Value::Duration(duration) = &value {
+        let millis =
+            crate::temporal::round_duration_to_millis(*duration).map_err(map_oxlsx_error)?;
+        const PY_MIN_MILLIS: i64 = -999_999_999 * 86_400_000;
+        const PY_MAX_MILLIS: i64 = 1_000_000_000 * 86_400_000 - 1;
+        if !(PY_MIN_MILLIS..=PY_MAX_MILLIS).contains(&millis) {
+            return Err(pyo3::exceptions::PyOverflowError::new_err(
+                "timedelta rounds outside Python's supported day range",
+            ));
+        }
+    }
+    crate::temporal::to_excel_serial(&value).map_err(map_oxlsx_error)?;
+    Ok(value)
+}
+
+fn reject_timezone(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    if !obj.getattr("tzinfo")?.is_none() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Excel does not support timezones in datetimes or times",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_date(obj: &Bound<'_, PyAny>) -> PyResult<NaiveDate> {
+    let year: i32 = obj.getattr("year")?.extract()?;
+    let month: u32 = obj.getattr("month")?.extract()?;
+    let day: u32 = obj.getattr("day")?.extract()?;
+    NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid date"))
+}
+
+fn extract_time(obj: &Bound<'_, PyAny>) -> PyResult<NaiveTime> {
+    let hour: u32 = obj.getattr("hour")?.extract()?;
+    let minute: u32 = obj.getattr("minute")?.extract()?;
+    let second: u32 = obj.getattr("second")?.extract()?;
+    let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
+    NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid time"))
 }
 
 fn map_oxlsx_error(err: OxlsxError) -> PyErr {
@@ -1897,6 +1959,9 @@ fn map_oxlsx_error(err: OxlsxError) -> PyErr {
         }
         OxlsxError::UnsupportedTranslate => {
             pyo3::exceptions::PyNotImplementedError::new_err(err.to_string())
+        }
+        OxlsxError::WriterFailed | OxlsxError::WriterAlreadySaved { .. } => {
+            pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
         }
         other => pyo3::exceptions::PyIOError::new_err(other.to_string()),
     }
@@ -1977,36 +2042,36 @@ fn append_column_from_key(key: &Bound<'_, PyAny>) -> PyResult<u32> {
 mod tests {
     use super::{PyCell, PyWorkbook, py_to_value, value_to_py};
     use crate::Value;
-    use chrono::NaiveDate;
+    use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
     use pyo3::prelude::*;
     use pyo3::types::{PyDate, PyDateAccess};
 
     #[test]
     fn value_to_py_maps_supported_variants() {
         Python::with_gil(|py| {
-            let empty = value_to_py(&Value::Empty, py);
+            let empty = value_to_py(&Value::Empty, py).unwrap();
             assert!(empty.bind(py).is_none());
 
-            let string = value_to_py(&Value::String("Hola".to_string()), py);
+            let string = value_to_py(&Value::String("Hola".to_string()), py).unwrap();
             assert_eq!(string.bind(py).extract::<String>().unwrap(), "Hola");
 
-            let int_like = value_to_py(&Value::Number(42.0), py);
+            let int_like = value_to_py(&Value::Number(42.0), py).unwrap();
             assert_eq!(int_like.bind(py).extract::<i64>().unwrap(), 42);
 
-            let float_like = value_to_py(&Value::Number(42.5), py);
+            let float_like = value_to_py(&Value::Number(42.5), py).unwrap();
             assert_eq!(float_like.bind(py).extract::<f64>().unwrap(), 42.5);
 
-            let bool_value = value_to_py(&Value::Bool(true), py);
+            let bool_value = value_to_py(&Value::Bool(true), py).unwrap();
             assert!(bool_value.bind(py).extract::<bool>().unwrap());
 
             let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
-            let py_date = value_to_py(&Value::Date(date), py);
+            let py_date = value_to_py(&Value::Date(date), py).unwrap();
             let py_date = py_date.bind(py).downcast::<PyDate>().unwrap();
             assert_eq!(py_date.get_year(), 2025);
             assert_eq!(py_date.get_month(), 1);
             assert_eq!(py_date.get_day(), 21);
 
-            let formula = value_to_py(&Value::Formula("SUM(B1:B3)".to_string()), py);
+            let formula = value_to_py(&Value::Formula("SUM(B1:B3)".to_string()), py).unwrap();
             assert_eq!(formula.bind(py).extract::<String>().unwrap(), "=SUM(B1:B3)");
         });
     }
@@ -2046,6 +2111,110 @@ mod tests {
                 py_to_value(&date_obj.into_any()).unwrap(),
                 Value::Date(NaiveDate::from_ymd_opt(2025, 1, 21).unwrap())
             );
+        });
+    }
+
+    #[test]
+    fn python_temporal_values_preserve_types_and_reject_timezones() {
+        Python::with_gil(|py| {
+            let datetime_module = PyModule::import_bound(py, "datetime").unwrap();
+            let datetime = datetime_module
+                .getattr("datetime")
+                .unwrap()
+                .call1((2025, 1, 21, 12, 34, 56, 789_000))
+                .unwrap();
+            assert_eq!(
+                py_to_value(&datetime).unwrap(),
+                Value::DateTime(NaiveDateTime::new(
+                    NaiveDate::from_ymd_opt(2025, 1, 21).unwrap(),
+                    NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap(),
+                ))
+            );
+
+            let time = datetime_module
+                .getattr("time")
+                .unwrap()
+                .call1((12, 34, 56, 789_000))
+                .unwrap();
+            assert_eq!(
+                py_to_value(&time).unwrap(),
+                Value::Time(NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap())
+            );
+
+            let timedelta = datetime_module
+                .getattr("timedelta")
+                .unwrap()
+                .call1((-1, 86_399, 998_500))
+                .unwrap();
+            assert_eq!(
+                py_to_value(&timedelta).unwrap(),
+                Value::Duration(Duration::microseconds(-1_500))
+            );
+
+            let timezone = datetime_module
+                .getattr("timezone")
+                .unwrap()
+                .getattr("utc")
+                .unwrap();
+            let aware = datetime_module
+                .getattr("datetime")
+                .unwrap()
+                .call1((2025, 1, 21, 12, 0, 0, 0, timezone))
+                .unwrap();
+            assert!(py_to_value(&aware).is_err());
+
+            let max_roundover = datetime_module
+                .getattr("datetime")
+                .unwrap()
+                .call1((9999, 12, 31, 23, 59, 59, 999_500))
+                .unwrap();
+            assert!(py_to_value(&max_roundover).is_err());
+
+            let timedelta_roundover = datetime_module
+                .getattr("timedelta")
+                .unwrap()
+                .call1((999_999_999, 86_399, 999_999))
+                .unwrap();
+            assert!(py_to_value(&timedelta_roundover).is_err());
+        });
+    }
+
+    #[test]
+    fn temporal_values_convert_back_to_python_types() {
+        Python::with_gil(|py| {
+            let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
+            let datetime = Value::DateTime(NaiveDateTime::new(
+                date,
+                NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap(),
+            ));
+            let py_datetime = value_to_py(&datetime, py).unwrap();
+            assert_eq!(py_datetime.bind(py).get_type().name().unwrap(), "datetime");
+
+            let py_time = value_to_py(
+                &Value::Time(NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap()),
+                py,
+            )
+            .unwrap();
+            assert_eq!(py_time.bind(py).get_type().name().unwrap(), "time");
+
+            let py_duration =
+                value_to_py(&Value::Duration(Duration::milliseconds(-2)), py).unwrap();
+            assert_eq!(py_duration.bind(py).get_type().name().unwrap(), "timedelta");
+        });
+    }
+
+    #[test]
+    fn untrusted_temporal_values_return_python_errors_without_panicking() {
+        Python::with_gil(|py| {
+            let out_of_range = Value::Date(NaiveDate::from_ymd_opt(10_000, 1, 1).unwrap());
+            assert!(value_to_py(&out_of_range, py).is_err());
+
+            let leap =
+                Value::Time(NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).unwrap());
+            assert!(value_to_py(&leap, py).is_err());
+
+            let huge = Value::Duration(Duration::days(1_000_000_000));
+            assert!(value_to_py(&huge, py).is_err());
         });
     }
 

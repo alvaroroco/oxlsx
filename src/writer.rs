@@ -27,6 +27,110 @@ pub(crate) struct CollectedStyles {
     pub rule_dxf_ids: HashMap<(usize, usize, usize), u32>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "internal pandas-writer seam is production code exercised before adapter wiring"
+    )
+)]
+pub(crate) mod native_writer {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum NativeWriterState {
+        Open,
+        Failed,
+        Saved(std::path::PathBuf),
+    }
+
+    /// Failure-isolating workbook owner used by the forthcoming Python batch adapter.
+    /// Mutations that return an error poison the writer, and a poisoned writer can
+    /// never persist earlier partial mutations.
+    pub struct NativeWorkbookWriter {
+        workbook: Workbook,
+        state: NativeWriterState,
+    }
+
+    impl NativeWorkbookWriter {
+        pub fn new() -> Self {
+            Self {
+                workbook: Workbook::new(),
+                state: NativeWriterState::Open,
+            }
+        }
+
+        pub fn workbook(&self) -> &Workbook {
+            &self.workbook
+        }
+
+        pub fn try_edit<T>(
+            &mut self,
+            edit: impl FnOnce(&mut Workbook) -> Result<T, OxlsxError>,
+        ) -> Result<T, OxlsxError> {
+            match &self.state {
+                NativeWriterState::Failed => return Err(OxlsxError::WriterFailed),
+                NativeWriterState::Saved(destination) => {
+                    return Err(OxlsxError::WriterAlreadySaved {
+                        destination: destination.clone(),
+                    });
+                }
+                NativeWriterState::Open => {}
+            }
+            self.state = NativeWriterState::Failed;
+            match edit(&mut self.workbook) {
+                Ok(value) => {
+                    self.state = NativeWriterState::Open;
+                    Ok(value)
+                }
+                Err(error) => Err(error),
+            }
+        }
+
+        pub fn edit_sheet<T>(
+            &mut self,
+            name: &str,
+            edit: impl FnOnce(&mut Worksheet) -> Result<T, OxlsxError>,
+        ) -> Result<T, OxlsxError> {
+            self.try_edit(|workbook| edit(workbook.ensure_sheet(name)))
+        }
+
+        pub fn save(&mut self, path: &Path) -> Result<(), OxlsxError> {
+            let destination = absolute_destination(path)?;
+            match &self.state {
+                NativeWriterState::Saved(saved) if saved == &destination => {
+                    return Ok(());
+                }
+                NativeWriterState::Saved(saved) => {
+                    return Err(OxlsxError::WriterAlreadySaved {
+                        destination: saved.clone(),
+                    });
+                }
+                NativeWriterState::Failed => return Err(OxlsxError::WriterFailed),
+                NativeWriterState::Open => {}
+            }
+            match write_xlsx(&self.workbook, path, self.workbook.source_path.as_deref()) {
+                Ok(()) => {
+                    self.state = NativeWriterState::Saved(destination);
+                    Ok(())
+                }
+                Err(error) => {
+                    self.state = NativeWriterState::Failed;
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn absolute_destination(path: &Path) -> Result<std::path::PathBuf, OxlsxError> {
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            Ok(std::env::current_dir()?.join(path))
+        }
+    }
+}
+
 // Returns (row, col) for sorting cells in sheet XML.
 pub(crate) fn cell_sort_key(reference: &str) -> (u32, u32) {
     let mut col = 0_u32;
@@ -49,7 +153,7 @@ pub(crate) fn collect_styles(
     sheets: &[Worksheet],
     original: Option<&StyleSheet>,
     preserve_original: bool,
-) -> CollectedStyles {
+) -> Result<CollectedStyles, OxlsxError> {
     let styled_cells = sheets
         .iter()
         .map(|sheet| sheet.cells().len())
@@ -162,7 +266,7 @@ pub(crate) fn collect_styles(
                 continue;
             }
 
-            let num_fmt_id = find_or_push_num_fmt(&mut num_fmts, kind.default_format());
+            let num_fmt_id = find_or_push_num_fmt(&mut num_fmts, kind.default_format())?;
 
             let style_id = find_or_push(
                 &mut cell_xfs,
@@ -210,7 +314,7 @@ pub(crate) fn collect_styles(
 
     num_fmts.sort_by_key(|(id, _)| *id);
 
-    CollectedStyles {
+    Ok(CollectedStyles {
         fonts,
         fills,
         cell_xfs,
@@ -218,7 +322,7 @@ pub(crate) fn collect_styles(
         dxfs,
         cell_style_ids,
         rule_dxf_ids,
-    }
+    })
 }
 
 fn collect_shared_strings(sheets: &[Worksheet]) -> IndexMap<String, usize> {
@@ -245,9 +349,12 @@ fn find_or_push<T: PartialEq>(items: &mut Vec<T>, value: T) -> usize {
     }
 }
 
-fn find_or_push_num_fmt(num_fmts: &mut Vec<(u32, String)>, format: &str) -> u32 {
+fn find_or_push_num_fmt(
+    num_fmts: &mut Vec<(u32, String)>,
+    format: &str,
+) -> Result<u32, OxlsxError> {
     if let Some((id, _)) = num_fmts.iter().find(|(_, existing)| existing == format) {
-        return *id;
+        return Ok(*id);
     }
     let next = num_fmts
         .iter()
@@ -255,9 +362,10 @@ fn find_or_push_num_fmt(num_fmts: &mut Vec<(u32, String)>, format: &str) -> u32 
         .max()
         .unwrap_or(163)
         .max(163)
-        + 1;
+        .checked_add(1)
+        .ok_or_else(|| OxlsxError::InvalidFormat("number format ID space exhausted".to_string()))?;
     num_fmts.push((next, format.to_string()));
-    next
+    Ok(next)
 }
 
 pub fn write_xlsx(
@@ -272,23 +380,199 @@ pub fn write_xlsx(
     // also checks early, at add_table time.
     ensure_unique_table_display_names(wb.worksheets())?;
 
-    if source_path.is_some_and(|source| source == path) {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let temp = NamedTempFile::new_in(parent)?;
-        write_xlsx_to_path(wb, temp.path(), source_path)?;
-        temp.persist(path)
-            .map_err(|err| OxlsxError::Io(err.error))?;
-        return Ok(());
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(OxlsxError::InvalidFormat(
+                "refusing to replace a symbolic-link destination".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
 
-    write_xlsx_to_path(wb, path, source_path)
+    // Replacement metadata guarantee: preserve `std::fs::Permissions`
+    // (Unix mode bits; Windows readonly attribute). ACLs, ownership changes,
+    // extended attributes, and timestamps are intentionally NOT claimed by
+    // this cross-platform API and require platform-specific acceptance tests.
+    let destination_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let parent = normalized_parent(path);
+    let temp = new_sibling_temp(parent, destination_permissions.as_ref())?;
+    let mut completed = write_xlsx_to_path(wb, temp.path(), source_path)?;
+    completed.flush()?;
+    apply_permissions_before_commit(&completed, destination_permissions.as_ref())?;
+    completed.sync_all()?;
+    drop(completed);
+    let windows_permissions_cleared =
+        prepare_windows_destination_for_replace(path, destination_permissions.as_ref())?;
+    if let Err(error) = temp.persist(path) {
+        restore_windows_destination_permissions(
+            path,
+            destination_permissions.as_ref(),
+            windows_permissions_cleared,
+        );
+        return Err(OxlsxError::Io(error.error));
+    }
+    apply_permissions_after_commit(path, destination_permissions.as_ref());
+    // The atomic rename is the public commit point. Directory sync strengthens
+    // crash durability where supported, but the public save contract does not
+    // promise crash-durable directory entries. A post-commit sync failure must
+    // therefore never be reported as an ordinary save failure or poison the
+    // state of NativeWorkbookWriter after the destination was replaced.
+    let _ = sync_parent_directory(parent);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_permissions_before_commit(
+    completed: &File,
+    permissions: Option<&std::fs::Permissions>,
+) -> Result<(), OxlsxError> {
+    if let Some(permissions) = permissions {
+        completed.set_permissions(permissions.clone())?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_permissions_before_commit(
+    _completed: &File,
+    _permissions: Option<&std::fs::Permissions>,
+) -> Result<(), OxlsxError> {
+    // Do not make the temporary file readonly: a failed persist would then be
+    // unable to remove it. The readonly attribute is restored after commit.
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_permissions_after_commit(path: &Path, permissions: Option<&std::fs::Permissions>) {
+    if let Some(permissions) = permissions {
+        // Commit already succeeded, so an attribute-restoration error cannot be
+        // reported as an ordinary save failure. This preserves the readonly
+        // attribute when Windows permits it; ACL preservation is not claimed.
+        let _ = std::fs::set_permissions(path, permissions.clone());
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_permissions_after_commit(_path: &Path, _permissions: Option<&std::fs::Permissions>) {}
+
+fn normalized_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(unix)]
+fn new_sibling_temp(
+    parent: &Path,
+    destination_permissions: Option<&std::fs::Permissions>,
+) -> Result<NamedTempFile, std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Match File::create's 0o666 request for new files, allowing the process
+    // umask to restrict it. Replacements request the prior mode and later apply
+    // it exactly after writing, because umask must not alter existing intent.
+    let requested = destination_permissions
+        .cloned()
+        .unwrap_or_else(|| std::fs::Permissions::from_mode(0o666));
+    tempfile::Builder::new()
+        .permissions(requested)
+        .tempfile_in(parent)
+}
+
+#[cfg(not(unix))]
+fn new_sibling_temp(
+    parent: &Path,
+    _destination_permissions: Option<&std::fs::Permissions>,
+) -> Result<NamedTempFile, std::io::Error> {
+    NamedTempFile::new_in(parent)
+}
+
+#[cfg(windows)]
+fn prepare_windows_destination_for_replace(
+    path: &Path,
+    permissions: Option<&std::fs::Permissions>,
+) -> Result<bool, OxlsxError> {
+    let Some(permissions) = permissions.filter(|permissions| permissions.readonly()) else {
+        return Ok(false);
+    };
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    std::fs::set_permissions(path, writable)?;
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn prepare_windows_destination_for_replace(
+    _path: &Path,
+    _permissions: Option<&std::fs::Permissions>,
+) -> Result<bool, OxlsxError> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn restore_windows_destination_permissions(
+    path: &Path,
+    permissions: Option<&std::fs::Permissions>,
+    permissions_were_cleared: bool,
+) {
+    if permissions_were_cleared && let Some(permissions) = permissions {
+        let _ = std::fs::set_permissions(path, permissions.clone());
+    }
+}
+
+#[cfg(not(windows))]
+fn restore_windows_destination_permissions(
+    _path: &Path,
+    _permissions: Option<&std::fs::Permissions>,
+    _permissions_were_cleared: bool,
+) {
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<(), OxlsxError> {
+    #[cfg(test)]
+    if take_injected_directory_sync_failure() {
+        return Err(std::io::Error::other("injected directory sync failure").into());
+    }
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<(), OxlsxError> {
+    #[cfg(test)]
+    if take_injected_directory_sync_failure() {
+        return Err(std::io::Error::other("injected directory sync failure").into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn take_injected_directory_sync_failure() -> bool {
+    DIRECTORY_SYNC_FAILURE.with(|failure| failure.replace(false))
+}
+
+#[cfg(test)]
+fn inject_directory_sync_failure_once() {
+    DIRECTORY_SYNC_FAILURE.with(|failure| failure.set(true));
 }
 
 fn write_xlsx_to_path(
     wb: &Workbook,
     path: &Path,
     source_path: Option<&Path>,
-) -> Result<(), OxlsxError> {
+) -> Result<File, OxlsxError> {
     let file = File::create(path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default();
@@ -301,7 +585,7 @@ fn write_xlsx_to_path(
         .enumerate()
         .filter_map(|(idx, sheet)| has_comments(sheet).then_some(idx + 1))
         .collect::<Vec<_>>();
-    let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original);
+    let collected = collect_styles(sheets, wb.original_styles.as_deref(), preserve_original)?;
     let mut written_entries = HashSet::new();
 
     // Allocate the internal `<table id>` for every table (verbatim tables keep
@@ -525,8 +809,7 @@ fn write_xlsx_to_path(
         )?;
     }
 
-    zip.finish()?;
-    Ok(())
+    Ok(zip.finish()?)
 }
 
 fn copy_unknown_entries(
@@ -1859,6 +2142,209 @@ mod tests {
     use zip::ZipArchive;
 
     #[test]
+    fn native_writer_renames_pristine_default_and_reuses_named_sheets() {
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer
+            .edit_sheet("First", |sheet| {
+                sheet.set_cell("A1", "one");
+                Ok(())
+            })
+            .unwrap();
+        writer
+            .edit_sheet("Second", |sheet| {
+                sheet.set_cell("A1", "two");
+                Ok(())
+            })
+            .unwrap();
+        writer
+            .edit_sheet("First", |sheet| {
+                sheet.set_cell("B1", "again");
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(writer.workbook().sheetnames(), vec!["First", "Second"]);
+        assert_eq!(
+            writer
+                .workbook()
+                .sheet_by_name("First")
+                .unwrap()
+                .cell("B1")
+                .unwrap()
+                .text(),
+            Some("again")
+        );
+    }
+
+    #[test]
+    fn native_writer_poisoning_prevents_save_and_saved_state_is_idempotent() {
+        let path = temp_path("oxlsx_native_writer_state.xlsx");
+        fs::write(&path, b"previous").unwrap();
+        let mut poisoned = super::native_writer::NativeWorkbookWriter::new();
+        let result: Result<(), crate::OxlsxError> = poisoned.try_edit(|_| {
+            Err(crate::OxlsxError::InvalidFormat(
+                "injected conversion failure".to_string(),
+            ))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            poisoned.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"previous");
+
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer
+            .edit_sheet("Data", |sheet| {
+                sheet.set_cell("A1", "ok");
+                Ok(())
+            })
+            .unwrap();
+        writer.save(&path).unwrap();
+        let first = fs::read(&path).unwrap();
+        writer.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), first);
+        let other = temp_path("oxlsx_native_writer_other.xlsx");
+        assert!(matches!(
+            writer.save(&other),
+            Err(crate::OxlsxError::WriterAlreadySaved { .. })
+        ));
+        assert!(!other.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_writer_panic_poisons_later_save() {
+        let path = temp_path("oxlsx_native_writer_panic_poison.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), crate::OxlsxError> = writer.try_edit(|workbook| {
+                workbook.active_mut().unwrap().set_cell("A1", "partial");
+                panic!("injected edit panic");
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert!(matches!(
+            writer.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn native_writer_saved_destination_has_stable_absolute_identity() {
+        let filename = format!(
+            "oxlsx_writer_identity_{}.xlsx",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let relative = std::path::Path::new(&filename);
+        let absolute = std::env::current_dir().unwrap().join(relative);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+
+        writer.save(relative).unwrap();
+        writer.save(&absolute).unwrap();
+
+        let _ = fs::remove_file(absolute);
+    }
+
+    #[test]
+    fn maximum_custom_num_fmt_id_returns_error() {
+        let mut num_fmts = vec![(u32::MAX, "0.00".to_string())];
+        assert!(super::find_or_push_num_fmt(&mut num_fmts, "yyyy-mm-dd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_symlink_destination_without_replacing_it() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("target.xlsx");
+        let link = parent.path().join("destination.xlsx");
+        fs::write(&target, b"original").unwrap();
+        symlink("target.xlsx", &link).unwrap();
+
+        assert!(Workbook::new().save(&link).is_err());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn native_writer_sheet_error_poisons_later_save() {
+        let path = temp_path("oxlsx_native_writer_sheet_poison.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        let result = writer.edit_sheet("Data", |sheet| {
+            sheet.set_cell("A1", "partial");
+            Err::<(), _>(crate::OxlsxError::InvalidFormat("injected".to_string()))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            writer.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rename_failure_cleans_sibling_temp_file() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("destination.xlsx");
+        fs::create_dir(&destination).unwrap();
+        let before = fs::read_dir(parent.path()).unwrap().count();
+
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        assert!(writer.save(&destination).is_err());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), before);
+        assert!(destination.is_dir());
+        let recovery = parent.path().join("recovery.xlsx");
+        assert!(matches!(
+            writer.save(&recovery),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!recovery.exists());
+    }
+
+    #[test]
+    fn native_writer_relative_save_commits_and_stays_saved() {
+        let filename = format!(
+            "oxlsx_relative_{}.xlsx",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::path::Path::new(&filename);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer.save(path).unwrap();
+        writer.save(path).unwrap();
+        assert!(path.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn post_commit_directory_sync_failure_does_not_poison_saved_state() {
+        let path = temp_path("oxlsx_post_commit_sync_failure.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        super::inject_directory_sync_failure_once();
+        writer.save(&path).unwrap();
+        writer.save(&path).unwrap();
+        assert!(path.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn assign_table_ids_avoids_verbatim_collision() {
         use crate::Table;
         use crate::table::RawTable;
@@ -1909,7 +2395,7 @@ mod tests {
         let mut ws = Worksheet::new("Sheet");
         ws.set_cell("A1", "Hello");
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fonts.len(), 1);
         assert_eq!(collected.fills.len(), 2);
@@ -1943,7 +2429,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fonts.len(), 2);
         assert_eq!(collected.fills.len(), 2);
@@ -1963,7 +2449,7 @@ mod tests {
             },
         );
 
-        let collected = super::collect_styles(&[ws], None, false);
+        let collected = super::collect_styles(&[ws], None, false).unwrap();
 
         assert_eq!(collected.fills.len(), 3);
     }

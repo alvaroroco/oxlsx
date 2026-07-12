@@ -31,6 +31,7 @@ fn temporal_values_round_trip_with_openpyxl_default_formats() {
     let path = temp_path("oxlsx_temporal_round_trip.xlsx");
     let mut wb = Workbook::new();
     let ws = wb.active_mut().unwrap();
+
     let date = NaiveDate::from_ymd_opt(2025, 1, 21).unwrap();
     let datetime = NaiveDateTime::new(
         date,
@@ -38,11 +39,13 @@ fn temporal_values_round_trip_with_openpyxl_default_formats() {
     );
     let time = NaiveTime::from_hms_milli_opt(12, 34, 56, 123).unwrap();
     let duration = Duration::milliseconds(-2);
+
     ws.set_cell("A1", Value::Date(date));
     ws.set_cell("B1", Value::DateTime(datetime));
     ws.set_cell("C1", Value::Time(time));
     ws.set_cell("D1", Value::Duration(duration));
     wb.save(&path).unwrap();
+
     let reopened = Workbook::open(&path).unwrap();
     let ws = reopened.active().unwrap();
     assert_eq!(ws.cell("A1").unwrap().value(), &Value::Date(date));
@@ -127,6 +130,19 @@ fn temporal_ties_round_to_even_for_positive_and_negative_durations() {
 }
 
 #[test]
+fn temporal_values_outside_python_excel_year_range_are_rejected() {
+    let path = temp_path("oxlsx_temporal_out_of_range.xlsx");
+    let _ = fs::remove_file(&path);
+    let mut wb = Workbook::new();
+    wb.active_mut().unwrap().set_cell(
+        "A1",
+        Value::Date(NaiveDate::from_ymd_opt(10_000, 1, 1).unwrap()),
+    );
+    assert!(matches!(wb.save(&path), Err(OxlsxError::InvalidFormat(_))));
+    assert!(!path.exists());
+}
+
+#[test]
 fn temporal_rmw_preserves_existing_explicit_number_format() {
     let path = temp_path("oxlsx_temporal_preserve_custom_format.xlsx");
     let wb = Workbook::open("samples/multi_sheet.xlsx").unwrap();
@@ -134,6 +150,96 @@ fn temporal_rmw_preserves_existing_explicit_number_format() {
     let styles = read_zip_entry(&path, "xl/styles.xml");
     assert!(styles.contains(r#"numFmtId="164" formatCode="dd/mm/yyyy""#));
     assert!(!styles.contains(r#"formatCode="yyyy-mm-dd""#));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn failed_save_preserves_an_existing_destination() {
+    let source = temp_path("oxlsx_atomic_corrupt_source.xlsx");
+    let destination = temp_path("oxlsx_atomic_destination.xlsx");
+
+    let mut seed = Workbook::new();
+    seed.active_mut().unwrap().set_cell("A1", "seed");
+    seed.save(&source).unwrap();
+    let wb = Workbook::open(&source).unwrap();
+
+    let sentinel = b"previous destination bytes";
+    fs::write(&destination, sentinel).unwrap();
+    fs::write(&source, b"not a zip anymore").unwrap();
+
+    assert!(wb.save(&destination).is_err());
+    assert_eq!(fs::read(&destination).unwrap(), sentinel);
+
+    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(destination);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replacement_preserves_existing_destination_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("oxlsx_atomic_permissions.xlsx");
+    let mut seed = Workbook::new();
+    seed.active_mut().unwrap().set_cell("A1", "old");
+    seed.save(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+    let mut replacement = Workbook::new();
+    replacement.active_mut().unwrap().set_cell("A1", "new");
+    replacement.save(&path).unwrap();
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_new_file_uses_secure_owner_read_write_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_path("oxlsx_atomic_new_permissions.xlsx");
+    let _ = fs::remove_file(&path);
+    let reference = temp_path("oxlsx_file_create_permissions.reference");
+    let _ = fs::remove_file(&reference);
+    fs::File::create(&reference).unwrap();
+    let expected = fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
+    Workbook::new().save(&path).unwrap();
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, expected);
+    let _ = fs::remove_file(reference);
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(windows)]
+#[test]
+fn atomic_replacement_preserves_windows_readonly_attribute() {
+    let path = temp_path("oxlsx_atomic_windows_readonly.xlsx");
+    Workbook::new().save(&path).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions).unwrap();
+
+    let mut replacement = Workbook::new();
+    replacement.active_mut().unwrap().set_cell("A1", "new");
+    replacement.save(&path).unwrap();
+    assert!(fs::metadata(&path).unwrap().permissions().readonly());
+    assert_eq!(
+        Workbook::open(&path)
+            .unwrap()
+            .active()
+            .unwrap()
+            .cell("A1")
+            .unwrap()
+            .text(),
+        Some("new")
+    );
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(&path, permissions).unwrap();
     let _ = fs::remove_file(path);
 }
 
