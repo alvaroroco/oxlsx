@@ -1960,6 +1960,9 @@ fn map_oxlsx_error(err: OxlsxError) -> PyErr {
         OxlsxError::UnsupportedTranslate => {
             pyo3::exceptions::PyNotImplementedError::new_err(err.to_string())
         }
+        OxlsxError::WriterFailed | OxlsxError::WriterAlreadySaved { .. } => {
+            pyo3::exceptions::PyRuntimeError::new_err(err.to_string())
+        }
         other => pyo3::exceptions::PyIOError::new_err(other.to_string()),
     }
 }

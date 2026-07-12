@@ -27,6 +27,100 @@ pub(crate) struct CollectedStyles {
     pub rule_dxf_ids: HashMap<(usize, usize, usize), u32>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "internal pandas-writer seam is production code exercised before adapter wiring"
+    )
+)]
+pub(crate) mod native_writer {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum NativeWriterState {
+        Open,
+        Failed,
+        Saved(std::path::PathBuf),
+    }
+
+    /// Failure-isolating workbook owner used by the forthcoming Python batch adapter.
+    /// Mutations that return an error poison the writer, and a poisoned writer can
+    /// never persist earlier partial mutations.
+    pub struct NativeWorkbookWriter {
+        workbook: Workbook,
+        state: NativeWriterState,
+    }
+
+    impl NativeWorkbookWriter {
+        pub fn new() -> Self {
+            Self {
+                workbook: Workbook::new(),
+                state: NativeWriterState::Open,
+            }
+        }
+
+        pub fn workbook(&self) -> &Workbook {
+            &self.workbook
+        }
+
+        pub fn try_edit<T>(
+            &mut self,
+            edit: impl FnOnce(&mut Workbook) -> Result<T, OxlsxError>,
+        ) -> Result<T, OxlsxError> {
+            match &self.state {
+                NativeWriterState::Failed => return Err(OxlsxError::WriterFailed),
+                NativeWriterState::Saved(destination) => {
+                    return Err(OxlsxError::WriterAlreadySaved {
+                        destination: destination.clone(),
+                    });
+                }
+                NativeWriterState::Open => {}
+            }
+            match edit(&mut self.workbook) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    self.state = NativeWriterState::Failed;
+                    Err(error)
+                }
+            }
+        }
+
+        pub fn edit_sheet<T>(
+            &mut self,
+            name: &str,
+            edit: impl FnOnce(&mut Worksheet) -> Result<T, OxlsxError>,
+        ) -> Result<T, OxlsxError> {
+            self.try_edit(|workbook| edit(workbook.ensure_sheet(name)))
+        }
+
+        pub fn save(&mut self, path: &Path) -> Result<(), OxlsxError> {
+            match &self.state {
+                NativeWriterState::Saved(destination) if destination == path => {
+                    return Ok(());
+                }
+                NativeWriterState::Saved(destination) => {
+                    return Err(OxlsxError::WriterAlreadySaved {
+                        destination: destination.clone(),
+                    });
+                }
+                NativeWriterState::Failed => return Err(OxlsxError::WriterFailed),
+                NativeWriterState::Open => {}
+            }
+            match write_xlsx(&self.workbook, path, self.workbook.source_path.as_deref()) {
+                Ok(()) => {
+                    self.state = NativeWriterState::Saved(path.to_path_buf());
+                    Ok(())
+                }
+                Err(error) => {
+                    self.state = NativeWriterState::Failed;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
 // Returns (row, col) for sorting cells in sheet XML.
 pub(crate) fn cell_sort_key(reference: &str) -> (u32, u32) {
     let mut col = 0_u32;
@@ -1857,6 +1951,112 @@ mod tests {
     use std::io::{BufReader, Cursor};
     use std::time::{SystemTime, UNIX_EPOCH};
     use zip::ZipArchive;
+
+    #[test]
+    fn native_writer_renames_pristine_default_and_reuses_named_sheets() {
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer
+            .edit_sheet("First", |sheet| {
+                sheet.set_cell("A1", "one");
+                Ok(())
+            })
+            .unwrap();
+        writer
+            .edit_sheet("Second", |sheet| {
+                sheet.set_cell("A1", "two");
+                Ok(())
+            })
+            .unwrap();
+        writer
+            .edit_sheet("First", |sheet| {
+                sheet.set_cell("B1", "again");
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(writer.workbook().sheetnames(), vec!["First", "Second"]);
+        assert_eq!(
+            writer
+                .workbook()
+                .sheet_by_name("First")
+                .unwrap()
+                .cell("B1")
+                .unwrap()
+                .text(),
+            Some("again")
+        );
+    }
+
+    #[test]
+    fn native_writer_poisoning_prevents_save_and_saved_state_is_idempotent() {
+        let path = temp_path("oxlsx_native_writer_state.xlsx");
+        fs::write(&path, b"previous").unwrap();
+        let mut poisoned = super::native_writer::NativeWorkbookWriter::new();
+        let result: Result<(), crate::OxlsxError> = poisoned.try_edit(|_| {
+            Err(crate::OxlsxError::InvalidFormat(
+                "injected conversion failure".to_string(),
+            ))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            poisoned.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"previous");
+
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer
+            .edit_sheet("Data", |sheet| {
+                sheet.set_cell("A1", "ok");
+                Ok(())
+            })
+            .unwrap();
+        writer.save(&path).unwrap();
+        let first = fs::read(&path).unwrap();
+        writer.save(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), first);
+        let other = temp_path("oxlsx_native_writer_other.xlsx");
+        assert!(matches!(
+            writer.save(&other),
+            Err(crate::OxlsxError::WriterAlreadySaved { .. })
+        ));
+        assert!(!other.exists());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_writer_sheet_error_poisons_later_save() {
+        let path = temp_path("oxlsx_native_writer_sheet_poison.xlsx");
+        let _ = fs::remove_file(&path);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        let result = writer.edit_sheet("Data", |sheet| {
+            sheet.set_cell("A1", "partial");
+            Err::<(), _>(crate::OxlsxError::InvalidFormat("injected".to_string()))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            writer.save(&path),
+            Err(crate::OxlsxError::WriterFailed)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn native_writer_relative_save_commits_and_stays_saved() {
+        let filename = format!(
+            "oxlsx_relative_{}.xlsx",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::path::Path::new(&filename);
+        let mut writer = super::native_writer::NativeWorkbookWriter::new();
+        writer.save(path).unwrap();
+        writer.save(path).unwrap();
+        assert!(path.exists());
+        let _ = fs::remove_file(path);
+    }
 
     #[test]
     fn assign_table_ids_avoids_verbatim_collision() {

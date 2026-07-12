@@ -1422,6 +1422,22 @@ impl Workbook {
             .expect("create_sheet always pushes one worksheet")
     }
 
+    pub(crate) fn ensure_sheet(&mut self, name: &str) -> &mut Worksheet {
+        if let Some(index) = self.sheets.iter().position(|sheet| sheet.title() == name) {
+            return &mut self.sheets[index];
+        }
+
+        if self.sheets.len() == 1
+            && self.sheets[0].title() == "Sheet"
+            && self.sheets[0].cells.is_empty()
+        {
+            self.sheets[0].name = name.to_string();
+            return &mut self.sheets[0];
+        }
+
+        self.create_sheet(name)
+    }
+
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), OxlsxError> {
         crate::writer::write_xlsx(self, path.as_ref(), self.source_path.as_deref())
     }
