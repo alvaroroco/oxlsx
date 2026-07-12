@@ -16,6 +16,10 @@ pub enum OxlsxError {
     TableIntersection(String),
     #[error("move_range with translate=true is not supported: formula translation is out of scope")]
     UnsupportedTranslate,
+    #[error("writer is failed and cannot persist a workbook")]
+    WriterFailed,
+    #[error("writer already committed to {destination:?}; it cannot save to another destination")]
+    WriterAlreadySaved { destination: std::path::PathBuf },
 }
 
 #[cfg(test)]
