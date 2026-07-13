@@ -2072,9 +2072,14 @@ fn write_color(xml: &mut Writer<Vec<u8>>, tag: &str, color: &Color) -> Result<()
             let indexed = indexed.to_string();
             write_empty(xml, tag, &[("indexed", indexed.as_str())])
         }
-        Color::Theme(theme) => {
-            let theme = theme.to_string();
-            write_empty(xml, tag, &[("theme", theme.as_str())])
+        Color::Theme(theme, tint) => {
+            let theme_str = theme.to_string();
+            if let Some(t) = tint {
+                let tint_str = t.to_string();
+                write_empty(xml, tag, &[("theme", theme_str.as_str()), ("tint", tint_str.as_str())])
+            } else {
+                write_empty(xml, tag, &[("theme", theme_str.as_str())])
+            }
         }
     }
 }

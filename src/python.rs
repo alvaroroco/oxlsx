@@ -1702,7 +1702,7 @@ impl PyColor {
     #[getter]
     fn theme(&self) -> Option<u32> {
         match self.inner {
-            Color::Theme(value) => Some(value),
+            Color::Theme(value, _) => Some(value),
             _ => None,
         }
     }

@@ -22,11 +22,11 @@ impl From<u32> for StyleId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Color {
     Argb(String),
     Indexed(u32),
-    Theme(u32),
+    Theme(u32, Option<f64>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -447,7 +447,9 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     if let Some(theme) = attr_value(e, b"theme")?
         && let Ok(value) = theme.parse::<u32>()
     {
-        return Ok(Some(Color::Theme(value)));
+        let tint = attr_value(e, b"tint")?
+            .and_then(|s| s.parse::<f64>().ok());
+        return Ok(Some(Color::Theme(value, tint)));
     }
 
     Ok(None)
@@ -494,6 +496,21 @@ mod tests {
         assert_eq!(sheet.fills[2].pattern_type, "solid");
         assert_eq!(sheet.fills[2].fg_color, Some(Color::Indexed(2)));
         assert_eq!(sheet.fills[3].fg_color, Some(Color::Indexed(5)));
+    }
+
+    // T-01 RED: Color::Theme must carry an optional tint field.
+    // This test fails to compile until Color::Theme is expanded to Theme(u32, Option<f64>).
+    #[test]
+    fn color_theme_carries_tint() {
+        let c = Color::Theme(1, Some(-0.25_f64));
+        assert_eq!(c, Color::Theme(1, Some(-0.25_f64)));
+    }
+
+    // T-01 TRIANGULATE: tint is optional; Theme(5, None) must also be valid.
+    #[test]
+    fn color_theme_tint_is_optional() {
+        let c = Color::Theme(5, None);
+        assert_eq!(c, Color::Theme(5, None));
     }
 
     #[test]
