@@ -3296,3 +3296,149 @@ fn multiple_rules_priorities_and_stopiftrue() {
 
     fs::remove_file(path).ok();
 }
+
+// ── T-21: samples/styles.xlsx — font strike parsing ──────────────────────────
+
+#[test]
+fn test_font_strike_parsing() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+    let cell = ws.cell("A1").unwrap();
+    assert!(
+        cell.font().unwrap().strike,
+        "A1 must have strikethrough set"
+    );
+}
+
+// ── T-22: samples/styles.xlsx — font color RGB ───────────────────────────────
+
+#[test]
+fn test_font_color_rgb() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A1: red strikethrough font — color FFFF0000
+    let a1 = ws.cell("A1").unwrap();
+    assert_eq!(
+        a1.font().unwrap().color,
+        Some(Color::Argb("FFFF0000".to_string())),
+        "A1 font color must be red FFFF0000"
+    );
+
+    // B1: orange font — color FFFF6600
+    let b1 = ws.cell("B1").unwrap();
+    assert_eq!(
+        b1.font().unwrap().color,
+        Some(Color::Argb("FFFF6600".to_string())),
+        "B1 font color must be orange FFFF6600"
+    );
+}
+
+// ── T-23: samples/styles.xlsx — fill start_color RGB ─────────────────────────
+
+#[test]
+fn test_fill_start_color_rgb() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A2: solid grey fill — fgColor FFB0B0B0
+    let a2 = ws.cell("A2").unwrap();
+    let fill = a2.fill().unwrap();
+    assert_eq!(
+        fill.start_color(),
+        Some(&Color::Argb("FFB0B0B0".to_string())),
+        "A2 fill start_color must be grey FFB0B0B0"
+    );
+}
+
+// ── T-24: samples/styles.xlsx — fill color tint ──────────────────────────────
+
+#[test]
+fn test_color_tint() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // B2: theme=4, tint=-0.25
+    let b2 = ws.cell("B2").unwrap();
+    let fill = b2.fill().unwrap();
+    let color = fill.start_color().expect("B2 fill must have a start_color");
+    match color {
+        Color::Theme(theme, tint) => {
+            assert_eq!(*theme, 4, "B2 fill theme index must be 4");
+            let tint_val = tint.expect("B2 fill must have a tint");
+            assert!(
+                (tint_val - (-0.25_f64)).abs() < 1e-6,
+                "B2 fill tint must be -0.25, got {tint_val}"
+            );
+        }
+        other => panic!("B2 fill color must be Color::Theme, got {other:?}"),
+    }
+}
+
+// ── T-25: Cell row() and column() accessors ───────────────────────────────────
+
+#[test]
+fn test_cell_row_column() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "v");
+    ws.set_cell("B3", "v");
+    ws.set_cell("Z26", "v");
+    ws.set_cell("AA1", "v");
+
+    let ws = wb.active().unwrap();
+
+    let a1 = ws.cell("A1").unwrap();
+    assert_eq!(a1.row(), 1, "A1 row must be 1");
+    assert_eq!(a1.column(), 1, "A1 column must be 1");
+
+    let b3 = ws.cell("B3").unwrap();
+    assert_eq!(b3.row(), 3, "B3 row must be 3");
+    assert_eq!(b3.column(), 2, "B3 column must be 2");
+
+    let z26 = ws.cell("Z26").unwrap();
+    assert_eq!(z26.row(), 26, "Z26 row must be 26");
+    assert_eq!(z26.column(), 26, "Z26 column must be 26");
+
+    let aa1 = ws.cell("AA1").unwrap();
+    assert_eq!(aa1.row(), 1, "AA1 row must be 1");
+    assert_eq!(aa1.column(), 27, "AA1 column must be 27");
+}
+
+// ── T-27: Parse verification — strike and tint survive read ──────────────────
+
+#[test]
+fn test_round_trip_strike_and_tint() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A1: strike must survive parse
+    let a1 = ws.cell("A1").unwrap();
+    assert!(
+        a1.font().unwrap().strike,
+        "strike must survive parse from styles.xlsx"
+    );
+    assert_eq!(
+        a1.font().unwrap().color,
+        Some(Color::Argb("FFFF0000".to_string())),
+        "A1 font color must survive parse"
+    );
+
+    // B2: tint must survive parse
+    let b2 = ws.cell("B2").unwrap();
+    let fill = b2.fill().unwrap();
+    let color = fill
+        .start_color()
+        .expect("B2 fill must have a start_color after parse");
+    match color {
+        Color::Theme(theme, tint) => {
+            assert_eq!(*theme, 4, "B2 theme must survive parse");
+            let tint_val = tint.expect("B2 tint must survive parse");
+            assert!(
+                (tint_val - (-0.25_f64)).abs() < 1e-6,
+                "B2 tint must survive parse, got {tint_val}"
+            );
+        }
+        other => panic!("B2 fill color must remain Color::Theme after parse, got {other:?}"),
+    }
+}

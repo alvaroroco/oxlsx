@@ -22,11 +22,11 @@ impl From<u32> for StyleId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Color {
     Argb(String),
     Indexed(u32),
-    Theme(u32),
+    Theme(u32, Option<f64>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +64,16 @@ impl Fill {
             bg_color: None,
         }
     }
+
+    /// openpyxl parity: `fill.start_color` — the foreground colour of the fill.
+    pub fn start_color(&self) -> Option<&Color> {
+        self.fg_color.as_ref()
+    }
+
+    /// openpyxl parity: `fill.end_color` — the background colour of the fill.
+    pub fn end_color(&self) -> Option<&Color> {
+        self.bg_color.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +82,7 @@ pub struct Font {
     pub size: f64,
     pub bold: bool,
     pub italic: bool,
+    pub strike: bool,
     pub color: Option<Color>,
 }
 
@@ -82,6 +93,7 @@ impl Default for Font {
             size: 0.0,
             bold: false,
             italic: false,
+            strike: false,
             color: None,
         }
     }
@@ -154,6 +166,8 @@ impl StyleSheet {
         loop {
             match xml.read_event_into(&mut buf)? {
                 Event::Start(e) => match e.local_name().as_ref() {
+                    b"strike" if in_font => cur_font.strike = true,
+                    b"strike" if in_dxf_font => cur_dxf_font.strike = true,
                     b"fonts" => in_fonts = true,
                     b"fills" => in_fills = true,
                     b"cellXfs" => in_cell_xfs = true,
@@ -263,6 +277,7 @@ impl StyleSheet {
                 Event::Empty(e) => match e.local_name().as_ref() {
                     b"b" if in_font => cur_font.bold = true,
                     b"i" if in_font => cur_font.italic = true,
+                    b"strike" if in_font => cur_font.strike = true,
                     b"sz" if in_font => {
                         if let Some(val) = attr_value(&e, b"val")? {
                             cur_font.size = val.parse().unwrap_or(0.0);
@@ -305,6 +320,7 @@ impl StyleSheet {
                     }
                     b"b" if in_dxf_font => cur_dxf_font.bold = true,
                     b"i" if in_dxf_font => cur_dxf_font.italic = true,
+                    b"strike" if in_dxf_font => cur_dxf_font.strike = true,
                     b"sz" if in_dxf_font => {
                         if let Some(val) = attr_value(&e, b"val")? {
                             cur_dxf_font.size = val.parse().unwrap_or(0.0);
@@ -447,7 +463,8 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     if let Some(theme) = attr_value(e, b"theme")?
         && let Ok(value) = theme.parse::<u32>()
     {
-        return Ok(Some(Color::Theme(value)));
+        let tint = attr_value(e, b"tint")?.and_then(|s| s.parse::<f64>().ok());
+        return Ok(Some(Color::Theme(value, tint)));
     }
 
     Ok(None)
@@ -494,6 +511,90 @@ mod tests {
         assert_eq!(sheet.fills[2].pattern_type, "solid");
         assert_eq!(sheet.fills[2].fg_color, Some(Color::Indexed(2)));
         assert_eq!(sheet.fills[3].fg_color, Some(Color::Indexed(5)));
+    }
+
+    // T-05 RED: Font::strike must be set to true when <strike/> appears inside <font>.
+    // Fails until Font gets a `strike` field and the SAX handler is added.
+    #[test]
+    fn font_strike_parsed_from_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><strike/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#;
+        let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
+        assert!(
+            sheet.fonts[0].strike,
+            "strike should be true when <strike/> is present"
+        );
+    }
+
+    // T-05 TRIANGULATE / T-06: absence of <strike> yields false (default).
+    #[test]
+    fn font_strike_default_is_false() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#;
+        let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
+        assert!(!sheet.fonts[0].strike, "strike should default to false");
+        assert!(
+            !Font::default().strike,
+            "Font::default().strike must be false"
+        );
+    }
+
+    // T-02: parse_color extracts the tint attribute when present.
+    #[test]
+    fn parse_color_theme_with_tint() {
+        use quick_xml::events::BytesStart;
+        let xml = br#"<color theme="2" tint="-0.249977111117893"/>"#;
+        let elem = BytesStart::from_content(
+            std::str::from_utf8(&xml[1..xml.len() - 2]).unwrap(),
+            "color".len(),
+        );
+        let color = super::parse_color(&elem).unwrap();
+        assert_eq!(
+            color,
+            Some(Color::Theme(2, Some(-0.249_977_111_117_893_f64)))
+        );
+    }
+
+    // T-02 TRIANGULATE: no tint attribute → Theme(N, None).
+    #[test]
+    fn parse_color_theme_without_tint() {
+        use quick_xml::events::BytesStart;
+        let xml = br#"<color theme="3"/>"#;
+        let elem = BytesStart::from_content(
+            std::str::from_utf8(&xml[1..xml.len() - 2]).unwrap(),
+            "color".len(),
+        );
+        let color = super::parse_color(&elem).unwrap();
+        assert_eq!(color, Some(Color::Theme(3, None)));
+    }
+
+    // T-01 RED: Color::Theme must carry an optional tint field.
+    // This test fails to compile until Color::Theme is expanded to Theme(u32, Option<f64>).
+    #[test]
+    fn color_theme_carries_tint() {
+        let c = Color::Theme(1, Some(-0.25_f64));
+        assert_eq!(c, Color::Theme(1, Some(-0.25_f64)));
+    }
+
+    // T-01 TRIANGULATE: tint is optional; Theme(5, None) must also be valid.
+    #[test]
+    fn color_theme_tint_is_optional() {
+        let c = Color::Theme(5, None);
+        assert_eq!(c, Color::Theme(5, None));
     }
 
     #[test]
@@ -616,5 +717,44 @@ mod tests {
             sheet.temporal_kind(StyleId(2)),
             Some(crate::temporal::TemporalKind::Time)
         );
+    }
+
+    // T-11 RED: Fill::start_color() must alias fg_color.
+    #[test]
+    fn fill_start_color_returns_fg_color() {
+        let fill = Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: Some(Color::Argb("FFFF0000".to_string())),
+            bg_color: None,
+        };
+        assert_eq!(
+            fill.start_color(),
+            Some(&Color::Argb("FFFF0000".to_string()))
+        );
+    }
+
+    // T-11 TRIANGULATE: start_color() is None when fg_color is None.
+    #[test]
+    fn fill_start_color_none_when_fg_none() {
+        let fill = Fill::none();
+        assert_eq!(fill.start_color(), None);
+    }
+
+    // T-12 RED: Fill::end_color() must alias bg_color.
+    #[test]
+    fn fill_end_color_returns_bg_color() {
+        let fill = Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: None,
+            bg_color: Some(Color::Argb("FF0000FF".to_string())),
+        };
+        assert_eq!(fill.end_color(), Some(&Color::Argb("FF0000FF".to_string())));
+    }
+
+    // T-12 TRIANGULATE: end_color() is None when bg_color is None.
+    #[test]
+    fn fill_end_color_none_when_bg_none() {
+        let fill = Fill::none();
+        assert_eq!(fill.end_color(), None);
     }
 }
