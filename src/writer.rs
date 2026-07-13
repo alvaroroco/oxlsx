@@ -2146,6 +2146,71 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use zip::ZipArchive;
 
+    // T-03 RED: write_color must serialize tint when Some; round-trip recovers it.
+    #[test]
+    fn write_color_theme_tint_round_trips() {
+        use crate::styles::{Color, StyleId};
+        use quick_xml::Writer;
+
+        let font = Font {
+            color: Some(Color::Theme(2, Some(-0.25_f64))),
+            ..Font::default()
+        };
+
+        let mut xml = Writer::new(Vec::new());
+        super::write_font(&mut xml, &font).unwrap();
+        let font_xml = String::from_utf8(xml.into_inner()).unwrap();
+
+        // Wrap in minimal stylesheet and parse back.
+        let stylesheet_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1">{font_xml}</fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#
+        );
+        let sheet = StyleSheet::parse(Cursor::new(stylesheet_xml.as_bytes())).unwrap();
+        let recovered = sheet.font(StyleId(0)).unwrap().color.clone();
+        assert_eq!(recovered, Some(Color::Theme(2, Some(-0.25_f64))));
+    }
+
+    // T-03 TRIANGULATE: Theme(1, None) round-trip has no tint attribute.
+    #[test]
+    fn write_color_theme_no_tint_round_trips() {
+        use crate::styles::{Color, StyleId};
+        use quick_xml::Writer;
+
+        let font = Font {
+            color: Some(Color::Theme(1, None)),
+            ..Font::default()
+        };
+
+        let mut xml = Writer::new(Vec::new());
+        super::write_font(&mut xml, &font).unwrap();
+        let font_xml = String::from_utf8(xml.into_inner()).unwrap();
+
+        assert!(!font_xml.contains("tint"), "tint must not appear when None");
+
+        let stylesheet_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1">{font_xml}</fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#
+        );
+        let sheet = StyleSheet::parse(Cursor::new(stylesheet_xml.as_bytes())).unwrap();
+        let recovered = sheet.font(StyleId(0)).unwrap().color.clone();
+        assert_eq!(recovered, Some(Color::Theme(1, None)));
+    }
+
     #[test]
     fn native_writer_renames_pristine_default_and_reuses_named_sheets() {
         let mut writer = super::native_writer::NativeWorkbookWriter::new();
