@@ -3296,3 +3296,16 @@ fn multiple_rules_priorities_and_stopiftrue() {
 
     fs::remove_file(path).ok();
 }
+
+// ── T-21: samples/styles.xlsx — font strike parsing ──────────────────────────
+
+#[test]
+fn test_font_strike_parsing() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+    let cell = ws.cell("A1").unwrap();
+    assert!(
+        cell.font().unwrap().strike,
+        "A1 must have strikethrough set"
+    );
+}
