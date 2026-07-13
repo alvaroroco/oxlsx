@@ -3350,3 +3350,29 @@ fn test_fill_start_color_rgb() {
         "A2 fill start_color must be grey FFB0B0B0"
     );
 }
+
+// ── T-24: samples/styles.xlsx — fill color tint ──────────────────────────────
+
+#[test]
+fn test_color_tint() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // B2: theme=4, tint=-0.25
+    let b2 = ws.cell("B2").unwrap();
+    let fill = b2.fill().unwrap();
+    let color = fill
+        .start_color()
+        .expect("B2 fill must have a start_color");
+    match color {
+        Color::Theme(theme, tint) => {
+            assert_eq!(*theme, 4, "B2 fill theme index must be 4");
+            let tint_val = tint.expect("B2 fill must have a tint");
+            assert!(
+                (tint_val - (-0.25_f64)).abs() < 1e-6,
+                "B2 fill tint must be -0.25, got {tint_val}"
+            );
+        }
+        other => panic!("B2 fill color must be Color::Theme, got {other:?}"),
+    }
+}
