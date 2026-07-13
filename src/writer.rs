@@ -1396,6 +1396,9 @@ pub(crate) fn write_font(xml: &mut Writer<Vec<u8>>, font: &Font) -> Result<(), O
     if font.italic {
         write_empty(xml, "i", &[])?;
     }
+    if font.strike {
+        write_empty(xml, "strike", &[])?;
+    }
 
     if font.size > 0.0 {
         let size = font.size.to_string();
@@ -1456,6 +1459,9 @@ fn write_dxf_font(xml: &mut Writer<Vec<u8>>, font: &Font) -> Result<(), OxlsxErr
     }
     if font.italic {
         write_empty(xml, "i", &[("val", "1")])?;
+    }
+    if font.strike {
+        write_empty(xml, "strike", &[])?;
     }
     if font.size > 0.0 {
         let size = font.size.to_string();

@@ -72,6 +72,7 @@ pub struct Font {
     pub size: f64,
     pub bold: bool,
     pub italic: bool,
+    pub strike: bool,
     pub color: Option<Color>,
 }
 
@@ -82,6 +83,7 @@ impl Default for Font {
             size: 0.0,
             bold: false,
             italic: false,
+            strike: false,
             color: None,
         }
     }
@@ -154,6 +156,8 @@ impl StyleSheet {
         loop {
             match xml.read_event_into(&mut buf)? {
                 Event::Start(e) => match e.local_name().as_ref() {
+                    b"strike" if in_font => cur_font.strike = true,
+                    b"strike" if in_dxf_font => cur_dxf_font.strike = true,
                     b"fonts" => in_fonts = true,
                     b"fills" => in_fills = true,
                     b"cellXfs" => in_cell_xfs = true,
@@ -263,6 +267,7 @@ impl StyleSheet {
                 Event::Empty(e) => match e.local_name().as_ref() {
                     b"b" if in_font => cur_font.bold = true,
                     b"i" if in_font => cur_font.italic = true,
+                    b"strike" if in_font => cur_font.strike = true,
                     b"sz" if in_font => {
                         if let Some(val) = attr_value(&e, b"val")? {
                             cur_font.size = val.parse().unwrap_or(0.0);
@@ -305,6 +310,7 @@ impl StyleSheet {
                     }
                     b"b" if in_dxf_font => cur_dxf_font.bold = true,
                     b"i" if in_dxf_font => cur_dxf_font.italic = true,
+                    b"strike" if in_dxf_font => cur_dxf_font.strike = true,
                     b"sz" if in_dxf_font => {
                         if let Some(val) = attr_value(&e, b"val")? {
                             cur_dxf_font.size = val.parse().unwrap_or(0.0);
@@ -496,6 +502,40 @@ mod tests {
         assert_eq!(sheet.fills[2].pattern_type, "solid");
         assert_eq!(sheet.fills[2].fg_color, Some(Color::Indexed(2)));
         assert_eq!(sheet.fills[3].fg_color, Some(Color::Indexed(5)));
+    }
+
+    // T-05 RED: Font::strike must be set to true when <strike/> appears inside <font>.
+    // Fails until Font gets a `strike` field and the SAX handler is added.
+    #[test]
+    fn font_strike_parsed_from_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><strike/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#;
+        let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
+        assert!(sheet.fonts[0].strike, "strike should be true when <strike/> is present");
+    }
+
+    // T-05 TRIANGULATE / T-06: absence of <strike> yields false (default).
+    #[test]
+    fn font_strike_default_is_false() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
+</styleSheet>"#;
+        let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
+        assert!(!sheet.fonts[0].strike, "strike should default to false");
+        assert!(!Font::default().strike, "Font::default().strike must be false");
     }
 
     // T-02: parse_color extracts the tint attribute when present.
