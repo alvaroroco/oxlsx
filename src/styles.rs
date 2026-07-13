@@ -498,6 +498,32 @@ mod tests {
         assert_eq!(sheet.fills[3].fg_color, Some(Color::Indexed(5)));
     }
 
+    // T-02: parse_color extracts the tint attribute when present.
+    #[test]
+    fn parse_color_theme_with_tint() {
+        use quick_xml::events::BytesStart;
+        let xml = br#"<color theme="2" tint="-0.249977111117893"/>"#;
+        let elem = BytesStart::from_content(
+            std::str::from_utf8(&xml[1..xml.len() - 2]).unwrap(),
+            "color".len(),
+        );
+        let color = super::parse_color(&elem).unwrap();
+        assert_eq!(color, Some(Color::Theme(2, Some(-0.249_977_111_117_893_f64))));
+    }
+
+    // T-02 TRIANGULATE: no tint attribute → Theme(N, None).
+    #[test]
+    fn parse_color_theme_without_tint() {
+        use quick_xml::events::BytesStart;
+        let xml = br#"<color theme="3"/>"#;
+        let elem = BytesStart::from_content(
+            std::str::from_utf8(&xml[1..xml.len() - 2]).unwrap(),
+            "color".len(),
+        );
+        let color = super::parse_color(&elem).unwrap();
+        assert_eq!(color, Some(Color::Theme(3, None)));
+    }
+
     // T-01 RED: Color::Theme must carry an optional tint field.
     // This test fails to compile until Color::Theme is expanded to Theme(u32, Option<f64>).
     #[test]
