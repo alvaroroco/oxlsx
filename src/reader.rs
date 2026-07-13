@@ -150,6 +150,24 @@ impl Cell {
         self.write_hyperlink.as_ref()
     }
 
+    /// openpyxl parity: `cell.row` — the 1-based row number of this cell.
+    ///
+    /// Computed on demand from the A1 reference string; no extra field is stored.
+    pub fn row(&self) -> u32 {
+        crate::coords::parse_a1(&self.reference)
+            .map(|(_, r)| r)
+            .expect("Cell reference must be a valid A1 address")
+    }
+
+    /// openpyxl parity: `cell.column` — the 1-based column number of this cell.
+    ///
+    /// Computed on demand from the A1 reference string; no extra field is stored.
+    pub fn column(&self) -> u32 {
+        crate::coords::parse_a1(&self.reference)
+            .map(|(c, _)| c)
+            .expect("Cell reference must be a valid A1 address")
+    }
+
     pub(crate) fn parsed(
         reference: String,
         value: Value,
@@ -3099,5 +3117,41 @@ mod tests {
         assert_eq!(ws.cell("A101").unwrap().value(), &s("data"));
         // XFD1048576 was NOT in the source range (which is A1:XFD100000), so it stays.
         assert_eq!(ws.cell("XFD1048576").unwrap().value(), &s("last"));
+    }
+
+    // T-13 RED: Cell::row() must return the 1-based row number from the reference.
+    #[test]
+    fn cell_row_returns_row_from_a1_reference() {
+        use super::Cell;
+        use std::sync::Arc;
+        let cell = Cell::empty("A1".to_string(), Arc::new(StyleSheet::default()));
+        assert_eq!(cell.row(), 1);
+    }
+
+    // T-13 TRIANGULATE: row from a different reference.
+    #[test]
+    fn cell_row_returns_correct_row_for_b3() {
+        use super::Cell;
+        use std::sync::Arc;
+        let cell = Cell::empty("B3".to_string(), Arc::new(StyleSheet::default()));
+        assert_eq!(cell.row(), 3);
+    }
+
+    // T-14 RED: Cell::column() must return the 1-based column number from the reference.
+    #[test]
+    fn cell_column_returns_column_from_a1_reference() {
+        use super::Cell;
+        use std::sync::Arc;
+        let cell = Cell::empty("B3".to_string(), Arc::new(StyleSheet::default()));
+        assert_eq!(cell.column(), 2);
+    }
+
+    // T-14 TRIANGULATE: Z1 -> column 26.
+    #[test]
+    fn cell_column_returns_26_for_z1() {
+        use super::Cell;
+        use std::sync::Arc;
+        let cell = Cell::empty("Z1".to_string(), Arc::new(StyleSheet::default()));
+        assert_eq!(cell.column(), 26);
     }
 }
