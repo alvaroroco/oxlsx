@@ -453,8 +453,7 @@ fn parse_color(e: &BytesStart<'_>) -> Result<Option<Color>, OxlsxError> {
     if let Some(theme) = attr_value(e, b"theme")?
         && let Ok(value) = theme.parse::<u32>()
     {
-        let tint = attr_value(e, b"tint")?
-            .and_then(|s| s.parse::<f64>().ok());
+        let tint = attr_value(e, b"tint")?.and_then(|s| s.parse::<f64>().ok());
         return Ok(Some(Color::Theme(value, tint)));
     }
 
@@ -518,7 +517,10 @@ mod tests {
   <cellXfs count="1"><xf fontId="0" fillId="0" numFmtId="0"/></cellXfs>
 </styleSheet>"#;
         let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
-        assert!(sheet.fonts[0].strike, "strike should be true when <strike/> is present");
+        assert!(
+            sheet.fonts[0].strike,
+            "strike should be true when <strike/> is present"
+        );
     }
 
     // T-05 TRIANGULATE / T-06: absence of <strike> yields false (default).
@@ -535,7 +537,10 @@ mod tests {
 </styleSheet>"#;
         let sheet = StyleSheet::parse(Cursor::new(xml.as_bytes())).unwrap();
         assert!(!sheet.fonts[0].strike, "strike should default to false");
-        assert!(!Font::default().strike, "Font::default().strike must be false");
+        assert!(
+            !Font::default().strike,
+            "Font::default().strike must be false"
+        );
     }
 
     // T-02: parse_color extracts the tint attribute when present.
@@ -548,7 +553,10 @@ mod tests {
             "color".len(),
         );
         let color = super::parse_color(&elem).unwrap();
-        assert_eq!(color, Some(Color::Theme(2, Some(-0.249_977_111_117_893_f64))));
+        assert_eq!(
+            color,
+            Some(Color::Theme(2, Some(-0.249_977_111_117_893_f64)))
+        );
     }
 
     // T-02 TRIANGULATE: no tint attribute → Theme(N, None).

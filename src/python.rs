@@ -2421,7 +2421,7 @@ mod tests {
     // T-07 GREEN verification: PyFont.strike returns the correct bool.
     #[test]
     fn py_font_strike_getter_returns_strike_state() {
-        use super::{PyFont};
+        use super::PyFont;
         use crate::styles::Font;
 
         let with_strike = PyFont {
@@ -2441,7 +2441,7 @@ mod tests {
     // T-08 GREEN verification: PyFont.color returns PyColor when font has a color.
     #[test]
     fn py_font_color_getter_returns_color() {
-        use super::{PyFont};
+        use super::PyFont;
         use crate::styles::{Color, Font};
 
         let font_with_color = PyFont {

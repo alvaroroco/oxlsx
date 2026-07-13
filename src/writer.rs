@@ -2082,7 +2082,11 @@ fn write_color(xml: &mut Writer<Vec<u8>>, tag: &str, color: &Color) -> Result<()
             let theme_str = theme.to_string();
             if let Some(t) = tint {
                 let tint_str = t.to_string();
-                write_empty(xml, tag, &[("theme", theme_str.as_str()), ("tint", tint_str.as_str())])
+                write_empty(
+                    xml,
+                    tag,
+                    &[("theme", theme_str.as_str()), ("tint", tint_str.as_str())],
+                )
             } else {
                 write_empty(xml, tag, &[("theme", theme_str.as_str())])
             }
