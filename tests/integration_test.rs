@@ -3333,3 +3333,20 @@ fn test_font_color_rgb() {
         "B1 font color must be orange FFFF6600"
     );
 }
+
+// ── T-23: samples/styles.xlsx — fill start_color RGB ─────────────────────────
+
+#[test]
+fn test_fill_start_color_rgb() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A2: solid grey fill — fgColor FFB0B0B0
+    let a2 = ws.cell("A2").unwrap();
+    let fill = a2.fill().unwrap();
+    assert_eq!(
+        fill.start_color(),
+        Some(&Color::Argb("FFB0B0B0".to_string())),
+        "A2 fill start_color must be grey FFB0B0B0"
+    );
+}
