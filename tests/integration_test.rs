@@ -3376,3 +3376,33 @@ fn test_color_tint() {
         other => panic!("B2 fill color must be Color::Theme, got {other:?}"),
     }
 }
+
+// ── T-25: Cell row() and column() accessors ───────────────────────────────────
+
+#[test]
+fn test_cell_row_column() {
+    let mut wb = Workbook::new();
+    let ws = wb.active_mut().unwrap();
+    ws.set_cell("A1", "v");
+    ws.set_cell("B3", "v");
+    ws.set_cell("Z26", "v");
+    ws.set_cell("AA1", "v");
+
+    let ws = wb.active().unwrap();
+
+    let a1 = ws.cell("A1").unwrap();
+    assert_eq!(a1.row(), 1, "A1 row must be 1");
+    assert_eq!(a1.column(), 1, "A1 column must be 1");
+
+    let b3 = ws.cell("B3").unwrap();
+    assert_eq!(b3.row(), 3, "B3 row must be 3");
+    assert_eq!(b3.column(), 2, "B3 column must be 2");
+
+    let z26 = ws.cell("Z26").unwrap();
+    assert_eq!(z26.row(), 26, "Z26 row must be 26");
+    assert_eq!(z26.column(), 26, "Z26 column must be 26");
+
+    let aa1 = ws.cell("AA1").unwrap();
+    assert_eq!(aa1.row(), 1, "AA1 row must be 1");
+    assert_eq!(aa1.column(), 27, "AA1 column must be 27");
+}
