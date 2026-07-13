@@ -3361,9 +3361,7 @@ fn test_color_tint() {
     // B2: theme=4, tint=-0.25
     let b2 = ws.cell("B2").unwrap();
     let fill = b2.fill().unwrap();
-    let color = fill
-        .start_color()
-        .expect("B2 fill must have a start_color");
+    let color = fill.start_color().expect("B2 fill must have a start_color");
     match color {
         Color::Theme(theme, tint) => {
             assert_eq!(*theme, 4, "B2 fill theme index must be 4");
