@@ -1148,6 +1148,18 @@ impl PyCell {
     fn hyperlink(&self) -> Option<PyHyperlink> {
         self.inner.hyperlink().map(PyHyperlink::from)
     }
+
+    /// openpyxl parity: `cell.row` — the 1-based row number of this cell.
+    #[getter]
+    fn row(&self) -> u32 {
+        self.inner.row()
+    }
+
+    /// openpyxl parity: `cell.column` — the 1-based column number of this cell.
+    #[getter]
+    fn column(&self) -> u32 {
+        self.inner.column()
+    }
 }
 
 #[pyclass(name = "Comment")]
@@ -1566,6 +1578,18 @@ impl PyFont {
     fn italic(&self) -> bool {
         self.inner.italic
     }
+
+    /// openpyxl parity: `font.strike` — `True` when the strikethrough flag is set.
+    #[getter]
+    fn strike(&self) -> bool {
+        self.inner.strike
+    }
+
+    /// openpyxl parity: `font.color` — returns the font color, or `None`.
+    #[getter]
+    fn color(&self) -> Option<PyColor> {
+        self.inner.color.clone().map(|inner| PyColor { inner })
+    }
 }
 
 #[pyclass(name = "Fill")]
@@ -1578,6 +1602,24 @@ impl PyFill {
     #[getter]
     fn fg_color(&self) -> Option<PyColor> {
         self.inner.fg_color.clone().map(|inner| PyColor { inner })
+    }
+
+    /// openpyxl parity: `fill.start_color` — the foreground colour of the fill.
+    #[getter]
+    fn start_color(&self) -> Option<PyColor> {
+        self.inner
+            .start_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
+    }
+
+    /// openpyxl parity: `fill.end_color` — the background colour of the fill.
+    #[getter]
+    fn end_color(&self) -> Option<PyColor> {
+        self.inner
+            .end_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
     }
 }
 
@@ -1702,7 +1744,7 @@ impl PyColor {
     #[getter]
     fn theme(&self) -> Option<u32> {
         match self.inner {
-            Color::Theme(value) => Some(value),
+            Color::Theme(value, _) => Some(value),
             _ => None,
         }
     }
@@ -1711,6 +1753,15 @@ impl PyColor {
     fn indexed(&self) -> Option<u32> {
         match self.inner {
             Color::Indexed(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// openpyxl parity: `color.tint` — the tint value for theme colors, or `None`.
+    #[getter]
+    fn tint(&self) -> Option<f64> {
+        match self.inner {
+            Color::Theme(_, tint) => tint,
             _ => None,
         }
     }
@@ -2395,5 +2446,156 @@ mod tests {
         let reopened = crate::Workbook::open(&path).unwrap();
         assert_eq!(reopened.active().unwrap().freeze_panes(), None);
         std::fs::remove_file(path).ok();
+    }
+
+    // T-07 GREEN verification: PyFont.strike returns the correct bool.
+    #[test]
+    fn py_font_strike_getter_returns_strike_state() {
+        use super::PyFont;
+        use crate::styles::Font;
+
+        let with_strike = PyFont {
+            inner: Font {
+                strike: true,
+                ..Font::default()
+            },
+        };
+        assert!(with_strike.strike());
+
+        let without_strike = PyFont {
+            inner: Font::default(),
+        };
+        assert!(!without_strike.strike());
+    }
+
+    // T-08 GREEN verification: PyFont.color returns PyColor when font has a color.
+    #[test]
+    fn py_font_color_getter_returns_color() {
+        use super::PyFont;
+        use crate::styles::{Color, Font};
+
+        let font_with_color = PyFont {
+            inner: Font {
+                color: Some(Color::Argb("FFFF0000".to_string())),
+                ..Font::default()
+            },
+        };
+        let py_color = font_with_color.color().expect("should have a color");
+        assert_eq!(py_color.rgb(), Some("FFFF0000".to_string()));
+
+        let font_no_color = PyFont {
+            inner: Font::default(),
+        };
+        assert!(font_no_color.color().is_none());
+    }
+
+    // T-09 GREEN verification: PyColor.tint returns tint for Theme colors.
+    #[test]
+    fn py_color_tint_getter_returns_tint_for_theme() {
+        use super::PyColor;
+        use crate::styles::Color;
+
+        let with_tint = PyColor {
+            inner: Color::Theme(2, Some(-0.25_f64)),
+        };
+        assert_eq!(with_tint.tint(), Some(-0.25_f64));
+
+        let without_tint = PyColor {
+            inner: Color::Theme(1, None),
+        };
+        assert_eq!(without_tint.tint(), None);
+
+        let rgb_color = PyColor {
+            inner: Color::Argb("FFFF0000".to_string()),
+        };
+        assert_eq!(rgb_color.tint(), None);
+    }
+
+    // T-15 RED: PyFill.start_color must alias fg_color.
+    #[test]
+    fn py_fill_start_color_returns_fg_color() {
+        use super::PyFill;
+        use crate::styles::{Color, Fill};
+
+        let fill_with_fg = PyFill {
+            inner: Fill {
+                pattern_type: "solid".to_string(),
+                fg_color: Some(Color::Argb("FFFF0000".to_string())),
+                bg_color: None,
+            },
+        };
+        let color = fill_with_fg.start_color().expect("should have start_color");
+        assert_eq!(color.rgb(), Some("FFFF0000".to_string()));
+
+        let fill_no_fg = PyFill {
+            inner: Fill {
+                pattern_type: "none".to_string(),
+                fg_color: None,
+                bg_color: None,
+            },
+        };
+        assert!(fill_no_fg.start_color().is_none());
+    }
+
+    // T-16 RED: PyFill.end_color must alias bg_color.
+    #[test]
+    fn py_fill_end_color_returns_bg_color() {
+        use super::PyFill;
+        use crate::styles::{Color, Fill};
+
+        let fill_with_bg = PyFill {
+            inner: Fill {
+                pattern_type: "solid".to_string(),
+                fg_color: None,
+                bg_color: Some(Color::Argb("FF0000FF".to_string())),
+            },
+        };
+        let color = fill_with_bg.end_color().expect("should have end_color");
+        assert_eq!(color.rgb(), Some("FF0000FF".to_string()));
+
+        let fill_no_bg = PyFill {
+            inner: Fill {
+                pattern_type: "none".to_string(),
+                fg_color: None,
+                bg_color: None,
+            },
+        };
+        assert!(fill_no_bg.end_color().is_none());
+    }
+
+    // T-17 RED: PyCell.row must return 1-based row from the inner cell reference.
+    #[test]
+    fn py_cell_row_getter_returns_row() {
+        use super::PyCell;
+        use crate::StyleSheet;
+        use std::sync::Arc;
+
+        let cell_a1 = PyCell {
+            inner: crate::reader::Cell::empty("A1".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_a1.row(), 1);
+
+        let cell_b3 = PyCell {
+            inner: crate::reader::Cell::empty("B3".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_b3.row(), 3);
+    }
+
+    // T-18 RED: PyCell.column must return 1-based column from the inner cell reference.
+    #[test]
+    fn py_cell_column_getter_returns_column() {
+        use super::PyCell;
+        use crate::StyleSheet;
+        use std::sync::Arc;
+
+        let cell_b3 = PyCell {
+            inner: crate::reader::Cell::empty("B3".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_b3.column(), 2);
+
+        let cell_z1 = PyCell {
+            inner: crate::reader::Cell::empty("Z1".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_z1.column(), 26);
     }
 }
