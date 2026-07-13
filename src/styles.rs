@@ -727,7 +727,10 @@ mod tests {
             fg_color: Some(Color::Argb("FFFF0000".to_string())),
             bg_color: None,
         };
-        assert_eq!(fill.start_color(), Some(&Color::Argb("FFFF0000".to_string())));
+        assert_eq!(
+            fill.start_color(),
+            Some(&Color::Argb("FFFF0000".to_string()))
+        );
     }
 
     // T-11 TRIANGULATE: start_color() is None when fg_color is None.

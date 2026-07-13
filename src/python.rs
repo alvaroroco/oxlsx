@@ -1607,13 +1607,19 @@ impl PyFill {
     /// openpyxl parity: `fill.start_color` — the foreground colour of the fill.
     #[getter]
     fn start_color(&self) -> Option<PyColor> {
-        self.inner.start_color().cloned().map(|inner| PyColor { inner })
+        self.inner
+            .start_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
     }
 
     /// openpyxl parity: `fill.end_color` — the background colour of the fill.
     #[getter]
     fn end_color(&self) -> Option<PyColor> {
-        self.inner.end_color().cloned().map(|inner| PyColor { inner })
+        self.inner
+            .end_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
     }
 }
 
