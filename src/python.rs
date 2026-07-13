@@ -2514,7 +2514,7 @@ mod tests {
     // T-15 RED: PyFill.start_color must alias fg_color.
     #[test]
     fn py_fill_start_color_returns_fg_color() {
-        use super::{PyColor, PyFill};
+        use super::PyFill;
         use crate::styles::{Color, Fill};
 
         let fill_with_fg = PyFill {
@@ -2540,7 +2540,7 @@ mod tests {
     // T-16 RED: PyFill.end_color must alias bg_color.
     #[test]
     fn py_fill_end_color_returns_bg_color() {
-        use super::{PyColor, PyFill};
+        use super::PyFill;
         use crate::styles::{Color, Fill};
 
         let fill_with_bg = PyFill {
