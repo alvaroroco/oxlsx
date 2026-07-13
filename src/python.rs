@@ -1566,6 +1566,18 @@ impl PyFont {
     fn italic(&self) -> bool {
         self.inner.italic
     }
+
+    /// openpyxl parity: `font.strike` — `True` when the strikethrough flag is set.
+    #[getter]
+    fn strike(&self) -> bool {
+        self.inner.strike
+    }
+
+    /// openpyxl parity: `font.color` — returns the font color, or `None`.
+    #[getter]
+    fn color(&self) -> Option<PyColor> {
+        self.inner.color.clone().map(|inner| PyColor { inner })
+    }
 }
 
 #[pyclass(name = "Fill")]
@@ -1711,6 +1723,15 @@ impl PyColor {
     fn indexed(&self) -> Option<u32> {
         match self.inner {
             Color::Indexed(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// openpyxl parity: `color.tint` — the tint value for theme colors, or `None`.
+    #[getter]
+    fn tint(&self) -> Option<f64> {
+        match self.inner {
+            Color::Theme(_, tint) => tint,
             _ => None,
         }
     }
@@ -2395,5 +2416,68 @@ mod tests {
         let reopened = crate::Workbook::open(&path).unwrap();
         assert_eq!(reopened.active().unwrap().freeze_panes(), None);
         std::fs::remove_file(path).ok();
+    }
+
+    // T-07 GREEN verification: PyFont.strike returns the correct bool.
+    #[test]
+    fn py_font_strike_getter_returns_strike_state() {
+        use super::{PyFont};
+        use crate::styles::Font;
+
+        let with_strike = PyFont {
+            inner: Font {
+                strike: true,
+                ..Font::default()
+            },
+        };
+        assert!(with_strike.strike());
+
+        let without_strike = PyFont {
+            inner: Font::default(),
+        };
+        assert!(!without_strike.strike());
+    }
+
+    // T-08 GREEN verification: PyFont.color returns PyColor when font has a color.
+    #[test]
+    fn py_font_color_getter_returns_color() {
+        use super::{PyFont};
+        use crate::styles::{Color, Font};
+
+        let font_with_color = PyFont {
+            inner: Font {
+                color: Some(Color::Argb("FFFF0000".to_string())),
+                ..Font::default()
+            },
+        };
+        let py_color = font_with_color.color().expect("should have a color");
+        assert_eq!(py_color.rgb(), Some("FFFF0000".to_string()));
+
+        let font_no_color = PyFont {
+            inner: Font::default(),
+        };
+        assert!(font_no_color.color().is_none());
+    }
+
+    // T-09 GREEN verification: PyColor.tint returns tint for Theme colors.
+    #[test]
+    fn py_color_tint_getter_returns_tint_for_theme() {
+        use super::PyColor;
+        use crate::styles::Color;
+
+        let with_tint = PyColor {
+            inner: Color::Theme(2, Some(-0.25_f64)),
+        };
+        assert_eq!(with_tint.tint(), Some(-0.25_f64));
+
+        let without_tint = PyColor {
+            inner: Color::Theme(1, None),
+        };
+        assert_eq!(without_tint.tint(), None);
+
+        let rgb_color = PyColor {
+            inner: Color::Argb("FFFF0000".to_string()),
+        };
+        assert_eq!(rgb_color.tint(), None);
     }
 }
