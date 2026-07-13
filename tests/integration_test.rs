@@ -3309,3 +3309,27 @@ fn test_font_strike_parsing() {
         "A1 must have strikethrough set"
     );
 }
+
+// ── T-22: samples/styles.xlsx — font color RGB ───────────────────────────────
+
+#[test]
+fn test_font_color_rgb() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A1: red strikethrough font — color FFFF0000
+    let a1 = ws.cell("A1").unwrap();
+    assert_eq!(
+        a1.font().unwrap().color,
+        Some(Color::Argb("FFFF0000".to_string())),
+        "A1 font color must be red FFFF0000"
+    );
+
+    // B1: orange font — color FFFF6600
+    let b1 = ws.cell("B1").unwrap();
+    assert_eq!(
+        b1.font().unwrap().color,
+        Some(Color::Argb("FFFF6600".to_string())),
+        "B1 font color must be orange FFFF6600"
+    );
+}
