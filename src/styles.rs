@@ -64,6 +64,16 @@ impl Fill {
             bg_color: None,
         }
     }
+
+    /// openpyxl parity: `fill.start_color` — the foreground colour of the fill.
+    pub fn start_color(&self) -> Option<&Color> {
+        self.fg_color.as_ref()
+    }
+
+    /// openpyxl parity: `fill.end_color` — the background colour of the fill.
+    pub fn end_color(&self) -> Option<&Color> {
+        self.bg_color.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -707,5 +717,44 @@ mod tests {
             sheet.temporal_kind(StyleId(2)),
             Some(crate::temporal::TemporalKind::Time)
         );
+    }
+
+    // T-11 RED: Fill::start_color() must alias fg_color.
+    #[test]
+    fn fill_start_color_returns_fg_color() {
+        let fill = Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: Some(Color::Argb("FFFF0000".to_string())),
+            bg_color: None,
+        };
+        assert_eq!(
+            fill.start_color(),
+            Some(&Color::Argb("FFFF0000".to_string()))
+        );
+    }
+
+    // T-11 TRIANGULATE: start_color() is None when fg_color is None.
+    #[test]
+    fn fill_start_color_none_when_fg_none() {
+        let fill = Fill::none();
+        assert_eq!(fill.start_color(), None);
+    }
+
+    // T-12 RED: Fill::end_color() must alias bg_color.
+    #[test]
+    fn fill_end_color_returns_bg_color() {
+        let fill = Fill {
+            pattern_type: "solid".to_string(),
+            fg_color: None,
+            bg_color: Some(Color::Argb("FF0000FF".to_string())),
+        };
+        assert_eq!(fill.end_color(), Some(&Color::Argb("FF0000FF".to_string())));
+    }
+
+    // T-12 TRIANGULATE: end_color() is None when bg_color is None.
+    #[test]
+    fn fill_end_color_none_when_bg_none() {
+        let fill = Fill::none();
+        assert_eq!(fill.end_color(), None);
     }
 }

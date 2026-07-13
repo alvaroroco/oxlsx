@@ -1148,6 +1148,18 @@ impl PyCell {
     fn hyperlink(&self) -> Option<PyHyperlink> {
         self.inner.hyperlink().map(PyHyperlink::from)
     }
+
+    /// openpyxl parity: `cell.row` — the 1-based row number of this cell.
+    #[getter]
+    fn row(&self) -> u32 {
+        self.inner.row()
+    }
+
+    /// openpyxl parity: `cell.column` — the 1-based column number of this cell.
+    #[getter]
+    fn column(&self) -> u32 {
+        self.inner.column()
+    }
 }
 
 #[pyclass(name = "Comment")]
@@ -1590,6 +1602,24 @@ impl PyFill {
     #[getter]
     fn fg_color(&self) -> Option<PyColor> {
         self.inner.fg_color.clone().map(|inner| PyColor { inner })
+    }
+
+    /// openpyxl parity: `fill.start_color` — the foreground colour of the fill.
+    #[getter]
+    fn start_color(&self) -> Option<PyColor> {
+        self.inner
+            .start_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
+    }
+
+    /// openpyxl parity: `fill.end_color` — the background colour of the fill.
+    #[getter]
+    fn end_color(&self) -> Option<PyColor> {
+        self.inner
+            .end_color()
+            .cloned()
+            .map(|inner| PyColor { inner })
     }
 }
 
@@ -2479,5 +2509,93 @@ mod tests {
             inner: Color::Argb("FFFF0000".to_string()),
         };
         assert_eq!(rgb_color.tint(), None);
+    }
+
+    // T-15 RED: PyFill.start_color must alias fg_color.
+    #[test]
+    fn py_fill_start_color_returns_fg_color() {
+        use super::PyFill;
+        use crate::styles::{Color, Fill};
+
+        let fill_with_fg = PyFill {
+            inner: Fill {
+                pattern_type: "solid".to_string(),
+                fg_color: Some(Color::Argb("FFFF0000".to_string())),
+                bg_color: None,
+            },
+        };
+        let color = fill_with_fg.start_color().expect("should have start_color");
+        assert_eq!(color.rgb(), Some("FFFF0000".to_string()));
+
+        let fill_no_fg = PyFill {
+            inner: Fill {
+                pattern_type: "none".to_string(),
+                fg_color: None,
+                bg_color: None,
+            },
+        };
+        assert!(fill_no_fg.start_color().is_none());
+    }
+
+    // T-16 RED: PyFill.end_color must alias bg_color.
+    #[test]
+    fn py_fill_end_color_returns_bg_color() {
+        use super::PyFill;
+        use crate::styles::{Color, Fill};
+
+        let fill_with_bg = PyFill {
+            inner: Fill {
+                pattern_type: "solid".to_string(),
+                fg_color: None,
+                bg_color: Some(Color::Argb("FF0000FF".to_string())),
+            },
+        };
+        let color = fill_with_bg.end_color().expect("should have end_color");
+        assert_eq!(color.rgb(), Some("FF0000FF".to_string()));
+
+        let fill_no_bg = PyFill {
+            inner: Fill {
+                pattern_type: "none".to_string(),
+                fg_color: None,
+                bg_color: None,
+            },
+        };
+        assert!(fill_no_bg.end_color().is_none());
+    }
+
+    // T-17 RED: PyCell.row must return 1-based row from the inner cell reference.
+    #[test]
+    fn py_cell_row_getter_returns_row() {
+        use super::PyCell;
+        use crate::StyleSheet;
+        use std::sync::Arc;
+
+        let cell_a1 = PyCell {
+            inner: crate::reader::Cell::empty("A1".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_a1.row(), 1);
+
+        let cell_b3 = PyCell {
+            inner: crate::reader::Cell::empty("B3".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_b3.row(), 3);
+    }
+
+    // T-18 RED: PyCell.column must return 1-based column from the inner cell reference.
+    #[test]
+    fn py_cell_column_getter_returns_column() {
+        use super::PyCell;
+        use crate::StyleSheet;
+        use std::sync::Arc;
+
+        let cell_b3 = PyCell {
+            inner: crate::reader::Cell::empty("B3".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_b3.column(), 2);
+
+        let cell_z1 = PyCell {
+            inner: crate::reader::Cell::empty("Z1".to_string(), Arc::new(StyleSheet::default())),
+        };
+        assert_eq!(cell_z1.column(), 26);
     }
 }
