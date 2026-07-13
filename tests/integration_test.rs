@@ -3406,3 +3406,41 @@ fn test_cell_row_column() {
     assert_eq!(aa1.row(), 1, "AA1 row must be 1");
     assert_eq!(aa1.column(), 27, "AA1 column must be 27");
 }
+
+// ── T-27: Parse verification — strike and tint survive read ──────────────────
+
+#[test]
+fn test_round_trip_strike_and_tint() {
+    let wb = Workbook::open("samples/styles.xlsx").unwrap();
+    let ws = wb.sheet(0).unwrap();
+
+    // A1: strike must survive parse
+    let a1 = ws.cell("A1").unwrap();
+    assert!(
+        a1.font().unwrap().strike,
+        "strike must survive parse from styles.xlsx"
+    );
+    assert_eq!(
+        a1.font().unwrap().color,
+        Some(Color::Argb("FFFF0000".to_string())),
+        "A1 font color must survive parse"
+    );
+
+    // B2: tint must survive parse
+    let b2 = ws.cell("B2").unwrap();
+    let fill = b2.fill().unwrap();
+    let color = fill
+        .start_color()
+        .expect("B2 fill must have a start_color after parse");
+    match color {
+        Color::Theme(theme, tint) => {
+            assert_eq!(*theme, 4, "B2 theme must survive parse");
+            let tint_val = tint.expect("B2 tint must survive parse");
+            assert!(
+                (tint_val - (-0.25_f64)).abs() < 1e-6,
+                "B2 tint must survive parse, got {tint_val}"
+            );
+        }
+        other => panic!("B2 fill color must remain Color::Theme after parse, got {other:?}"),
+    }
+}
