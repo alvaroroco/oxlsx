@@ -6,6 +6,7 @@ A failure in oxlsx only → divergence from openpyxl.
 A failure in both → bad fixture or broken sample file.
 """
 
+import ast
 import datetime
 import os
 import tempfile
@@ -1681,3 +1682,31 @@ def test_cell_zero_index_raises_valueerror():
 
     # Valid 1-based access still works.
     assert ws.cell(row=1, column=1).value == "valid"
+
+# ---------------------------------------------------------------------------
+# Python typing: shipped PyO3 public API stub
+# ---------------------------------------------------------------------------
+
+
+def test_root_stub_covers_public_pyo3_api():
+    """The maturin root stub must describe the public Python API."""
+    stub_path = os.path.join(os.path.dirname(__file__), "..", "oxlsx.pyi")
+    with open(stub_path, encoding="utf-8") as stub_file:
+        stub = stub_file.read()
+
+    stub_module = ast.parse(stub, filename=stub_path)
+    stub_declarations = {
+        node.name
+        for node in stub_module.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        and not node.name.startswith("_")
+    }
+    runtime_declarations = {
+        name
+        for name in dir(oxlsx)
+        if not name.startswith("_")
+        and (isinstance(getattr(oxlsx, name), type) or callable(getattr(oxlsx, name)))
+    }
+
+    assert stub_declarations
+    assert stub_declarations == runtime_declarations
