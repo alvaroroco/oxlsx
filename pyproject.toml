@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "oxlsx"
-version = "0.1.1"
+version = "0.2.0"
 description = "A fast .xlsx reader/writer with an openpyxl-style API, powered by Rust"
 authors = [{ name = "Álvaro Rodríguez", email = "alvaroroco@proton.me" }]
 license = "MIT OR Apache-2.0"

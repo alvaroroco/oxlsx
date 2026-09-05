@@ -6,7 +6,7 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 ## Status
 
-**v0.1.1 — released on [PyPI](https://pypi.org/project/oxlsx/) and [crates.io](https://crates.io/crates/oxlsx).** Feature-complete (phases 1–14) plus the openpyxl-migration additions below.
+**v0.2.0** — phases 1–14 plus temporal values, style API additions, and Python type stubs. See [PyPI](https://pypi.org/project/oxlsx/) and [crates.io](https://crates.io/crates/oxlsx) for published packages.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
@@ -28,15 +28,30 @@ A high-performance Rust library for reading and writing `.xlsx` files with full 
 
 **openpyxl-migration additions (v0.1.1):** conditional formatting (`FormulaRule` / `CellIsRule`), sheet `auto_filter`, `PatternFill`, `get_column_letter` / `column_index_from_string`, and `dataframe_to_rows`.
 
+### New in v0.2.0
+
+- Typed datetime, time, and duration values, including Python `datetime`, `time`, and `timedelta` support.
+- Strikethrough fonts, theme-color tint preservation, fill-color aliases, and cell row/column accessors.
+- Python type stubs for editor autocomplete and static analysis.
+- Atomic workbook saves with symbolic-link destination rejection.
+
+**Rust migration from v0.1.1:** this release includes source-breaking API changes:
+
+- Replace `Color::Theme(index)` with `Color::Theme(index, None)` (or `Some(tint)`); update matching patterns to accept the second field.
+- Include the new `Font.strike` field in complete struct literals, or use `..Default::default()`.
+- Handle `Value::DateTime`, `Value::Time`, and `Value::Duration` in exhaustive matches.
+
+The pandas engine remains planned; pandas `Styler` support is not included.
+
 ## Install
 
 ### Rust
 ```toml
 # Cargo.toml
 [dependencies]
-oxlsx = "0.1.1"
+oxlsx = "0.2.0"
 ```
-> Or pin to a tag from git: `oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.1.1" }`
+> Or pin to a tag from git: `oxlsx = { git = "https://github.com/alvaroroco/oxlsx", tag = "v0.2.0" }`
 
 ### Python (build from source via maturin)
 
@@ -51,7 +66,7 @@ To build from source, use [maturin](https://www.maturin.rs/). The wheel build (a
 ```bash
 pip install maturin
 maturin develop --release   # install into the active venv
-# or: maturin build --release  -> target/wheels/oxlsx-0.1.1-cp38-abi3-*.whl
+# or: maturin build --release  -> target/wheels/oxlsx-0.2.0-cp38-abi3-*.whl
 ```
 
 > Contributors running the in-crate PyO3 tests use the interpreter-linked path instead: `cargo test --features python`.
@@ -79,6 +94,10 @@ fn main() -> Result<(), oxlsx::OxlsxError> {
             Value::Number(n)  => println!("number: {n}"),
             Value::Bool(b)    => println!("bool: {b}"),
             Value::Date(d)    => println!("date: {d}"),
+            Value::DateTime(d) => println!("datetime: {d}"),
+            Value::Time(t)    => println!("time: {t}"),
+            Value::Duration(d) => println!("duration: {d}"),
+            Value::Formula(f) => println!("formula: {f}"),
             Value::Empty      => println!("empty"),
         }
 
@@ -190,12 +209,12 @@ python3 benches/openpyxl_comparison.py  # Python baseline
 | `Workbook` | Entry point — open or create, access sheets |
 | `Worksheet` | Access / set cells by Excel reference (`"A1"`, `"B3"`) |
 | `Cell` | Holds `Value` + `StyleId` + shared `Arc<StyleSheet>` |
-| `Value` | `Empty \| String(String) \| Number(f64) \| Bool(bool) \| Date(NaiveDate) \| Formula(String)` |
+| `Value` | `Empty \| String(String) \| Number(f64) \| Bool(bool) \| Date(NaiveDate) \| DateTime(NaiveDateTime) \| Time(NaiveTime) \| Duration(chrono::Duration) \| Formula(String)` |
 | `StyleSheet` | Registry mapping `StyleId` → `Font` + `Fill` |
 | `StyleId` | Newtype `(usize)` — prevents index confusion at compile time |
-| `Font` | Bold, italic, size, family, color |
+| `Font` | Bold, italic, strikethrough, size, family, color |
 | `Fill` | Pattern type, foreground/background color |
-| `Color` | `Argb(String) \| Indexed(u32) \| Theme(u32)` |
+| `Color` | `Argb(String) \| Indexed(u32) \| Theme(u32, Option<f64>)` (theme index and optional tint) |
 | `DefinedName` | Named range — `name`, `value` (+ `comment`, `hidden`); global or sheet-local |
 | `Table` | Worksheet table — `display_name`, `ref`, `columns`, optional `TableStyleInfo`; lossless RMW for unmodeled features |
 | `Dxf` | Differential format (fill / font) referenced by conditional-formatting rules |
