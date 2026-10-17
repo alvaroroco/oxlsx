@@ -60,6 +60,11 @@ Project-specific skills are in `.agents/skills/`:
 - `rust-performance` — avoid clones, pre-allocate, mem::take
 - `rust-type-driven` — newtype pattern, invalid states unrepresentable
 
+The distributable consumer skill is in `skills/oxlsx/SKILL.md`; use it for
+Python/Rust application usage, openpyxl migration, and workbook best practices.
+Use `skills/openpyxl-to-oxlsx/SKILL.md` for dedicated Python migration audits,
+API adaptations, and behavioral-parity validation against openpyxl.
+
 ## TDD
 
 **Strict TDD is always active.** Test runner: `cargo test`

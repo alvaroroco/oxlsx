@@ -71,6 +71,36 @@ maturin develop --release   # install into the active venv
 
 > Contributors running the in-crate PyO3 tests use the interpreter-linked path instead: `cargo test --features python`.
 
+## AI agent skill
+
+The [oxlsx skill](skills/oxlsx/SKILL.md) provides Python and Rust usage guidance,
+tested examples, compatibility boundaries, and workbook-handling best practices.
+It uses the portable `SKILL.md` format supported by the [skills CLI](https://skills.sh/docs/cli).
+
+From this checkout:
+
+```bash
+npx skills add ./skills/oxlsx --skill oxlsx
+```
+
+Install from GitHub with:
+
+```bash
+npx skills add alvaroroco/oxlsx --skill oxlsx
+```
+
+Add `--agent codex` to target Codex, or `--global` for a user-wide installation.
+Check discovery without installing with `npx skills add ./skills/oxlsx --list`.
+
+For existing Python code, the standalone [openpyxl migration skill](skills/openpyxl-to-oxlsx/SKILL.md)
+adds a compatibility audit, explicit API adaptations, and baseline/output parity checks:
+
+```bash
+npx skills add ./skills/openpyxl-to-oxlsx --skill openpyxl-to-oxlsx
+```
+
+From GitHub, use `npx skills add alvaroroco/oxlsx --skill openpyxl-to-oxlsx`.
+
 ## Usage
 
 ### Reading
